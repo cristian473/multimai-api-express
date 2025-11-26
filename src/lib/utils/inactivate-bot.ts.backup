@@ -1,0 +1,59 @@
+import { saveConversationMessage } from "../db/repositories";
+import { WhatsAppWebhookPayload } from "./message-queue";
+
+export async function hasToReply(webhookPayload: WhatsAppWebhookPayload): Promise<boolean> {
+  const { payload, session, metadata } = webhookPayload;
+
+  const isHumanContinuing = Boolean(payload?.fromMe && payload.source !== 'api');
+  const isBotTalkingToCustomer = Boolean(payload?.fromMe && payload.source === 'api');
+  const customerNumber = payload.fromMe ? payload.to : payload.from;
+  const conversationKey = `${session}:${customerNumber}`;
+
+  console.log("🤖 isHumanContinuing", isHumanContinuing);
+  console.log("🤖 isBotTalkingToCustomer", isBotTalkingToCustomer);
+  console.log("🤖 customerNumber", customerNumber);
+  console.log("🤖 conversationKey", conversationKey);
+
+  if(isBotTalkingToCustomer) {
+    return false;
+  }
+  // si cae aca habla es el dueño respondiendo
+  if (isHumanContinuing) {
+    setTemporallyBlock(conversationKey, Number(2) * 60000);
+    console.log("🤖 isHumanContinuing", conversationKey);
+    await saveConversationMessage(metadata.uid as string, customerNumber, 'assistant', payload.body)
+    return false;
+  }
+
+  // si cae aca es un humano respondiendole a un humano
+  if (isTalkingWithHuman(conversationKey)) {
+    setTemporallyBlock(conversationKey, Number(2) * 60000);
+    console.log("🤖 isTalkingWithHuman", conversationKey);
+    await saveConversationMessage(metadata.uid as string, customerNumber, 'user', payload.body)
+    return false;
+  }
+  return true;
+}
+
+const timers: any = {};
+
+// Function to start the inactivity timer for a user
+const setTemporallyBlock = (key: string, ms: number) => {
+  const currentTimeOut = timers[key];
+  if (currentTimeOut && typeof currentTimeOut === "number") {
+    clearTimeout(currentTimeOut);
+  }
+
+  //bloqueado indefinidamente
+  if (ms < 0) {
+    timers[key] = true;
+  }
+
+  timers[key] = setTimeout(() => {
+    delete timers[key];
+  }, ms);
+};
+
+const isTalkingWithHuman = (from: string) => {
+  return Boolean(timers[from]);
+};

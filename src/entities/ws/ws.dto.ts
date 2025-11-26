@@ -1,13 +1,20 @@
-// WhatsApp webhook payload interface based on WAHA structure
+// WhatsApp webhook payload interface based on WAHA NOWEB structure
 export interface WhatsAppWebhookPayload {
   id: string;
   timestamp: number;
   event: string;
   session: string;
-  metadata: Record<string, any>;
+  metadata: {
+    uid: string;
+    email?: string;
+    name?: string;
+    // Allow extra metadata fields for forward compatibility
+    [key: string]: unknown;
+  };
   me: {
     id: string;
     pushName: string;
+    lid?: string;
   };
   payload: {
     id: string;
@@ -15,107 +22,41 @@ export interface WhatsAppWebhookPayload {
     from: string;
     fromMe: boolean;
     source: string;
-    to: string;
+    // WAHA NOWEB payload does not always include "to", keep it optional
+    to?: string;
     body: string;
     hasMedia: boolean;
     media: {
       url: string;
-      filename: string | null;
-      mimetype: string;
+      filename?: string | null;
+      mimetype?: string;
     } | null;
     ack: number;
     ackName: string;
-    vCards: any[];
-    _data: {
-      id: {
-        fromMe: boolean;
-        remote: string;
-        id: string;
-        _serialized: string;
-      };
-      viewed: boolean;
+    location: unknown | null;
+    vCards: unknown[] | null;
+    replyTo?: {
       body: string;
-      type: string;
-      t: number;
-      clientReceivedTsMillis: number;
-      notifyName: string;
-      from: string;
-      to: string;
-      ack: number;
-      invis: boolean;
-      isNewMsg: boolean;
-      star: boolean;
-      kicNotified: boolean;
-      recvFresh: boolean;
-      isFromTemplate: boolean;
-      pollInvalidated: boolean;
-      isSentCagPollCreation: boolean;
-      latestEditMsgKey: string | null;
-      latestEditSenderTimestampMs: number | null;
-      mentionedJidList: any[];
-      groupMentions: any[];
-      isEventCanceled: boolean;
-      eventInvalidated: boolean;
-      isVcardOverMmsDocument: boolean;
-      isForwarded: boolean;
-      isQuestion: boolean;
-      questionReplyQuotedMessage: any | null;
-      questionResponsesCount: number;
-      readQuestionResponsesCount: number;
-      labels: any[];
-      hasReaction: boolean;
-      viewMode: string;
-      messageSecret: Record<string, number>;
-      productHeaderImageRejected: boolean;
-      lastPlaybackProgress: number;
-      isDynamicReplyButtonsMsg: boolean;
-      isCarouselCard: boolean;
-      parentMsgId: string | null;
-      callSilenceReason: string | null;
-      isVideoCall: boolean;
-      callDuration: number | null;
-      callCreator: string | null;
-      callParticipants: any | null;
-      isCallLink: boolean | null;
-      callLinkToken: string | null;
-      isMdHistoryMsg: boolean;
-      stickerSentTs: number;
-      isAvatar: boolean;
-      lastUpdateFromServerTs: number;
-      invokedBotWid: string | null;
-      bizBotType: string | null;
-      botResponseTargetId: string | null;
-      botPluginType: string | null;
-      botPluginReferenceIndex: number | null;
-      botPluginSearchProvider: string | null;
-      botPluginSearchUrl: string | null;
-      botPluginSearchQuery: string | null;
-      botPluginMaybeParent: boolean;
-      botReelPluginThumbnailCdnUrl: string | null;
-      botMessageDisclaimerText: string | null;
-      botMsgBodyType: string | null;
-      reportingTokenInfo: {
-        reportingToken: Record<string, number>;
-        version: number;
-        reportingTag: Record<string, number>;
-      };
-      requiresDirectConnection: boolean | null;
-      bizContentPlaceholderType: string | null;
-      hostedBizEncStateMismatch: boolean;
-      senderOrRecipientAccountTypeHosted: boolean;
-      placeholderCreatedWhenAccountIsHosted: boolean;
-      galaxyFlowDisabled: boolean;
-      groupHistoryBundleMessageKey: string | null;
-      groupHistoryBundleMetadata: any | null;
-      links: any[];
+    } | null;
+    _data: {
+      key: Record<string, unknown>;
+      messageTimestamp: number;
+      pushName: string;
+      broadcast: boolean;
+      message: Record<string, unknown>;
+      status: number;
+      // Keep legacy field for backward compatibility where available
+      notifyName?: string;
+      [key: string]: unknown;
     };
   };
   engine: string;
   environment: {
     version: string;
     engine: string;
-    tier: string;
-    browser: string;
+    tier?: string;
+    browser: string | null;
+    [key: string]: unknown;
   };
 }
 
@@ -198,3 +139,14 @@ export interface WahaApiResponse {
 }
 
 
+
+// Activate agent request DTO
+export interface ActivateAgentRequest {
+  uid: string;
+  session: string;
+  userPhone: string;
+  userName: string;
+  assistantMessage: string;
+  replyToMessageId?: string;
+  reminderId?: string;
+}

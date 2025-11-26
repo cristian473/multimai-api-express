@@ -26,12 +26,12 @@ const app = express();
 
 // **** Setup **** //
 
-// Basic middleware
-app.use(express.json());
-app.use(express.urlencoded({extended: true}));
+// Basic middleware - increased limits for AI responses with images
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use(cookieParser(EnvVars.CookieProps.Secret));
-app.use(bodyParser.urlencoded({ extended: false }))
-app.use(bodyParser.json())
+app.use(bodyParser.urlencoded({ extended: false, limit: '10mb' }));
+app.use(bodyParser.json({ limit: '10mb' }));
 app.use(cors());
 
 // Show routes called in console during development

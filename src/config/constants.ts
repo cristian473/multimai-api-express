@@ -13,3 +13,10 @@ export const propertyDoc = (uid:string, property_id:string) => `users/${uid}/pro
 export const propertyVisits = (uid:string) => `users/${uid}/property_visits`
 export const propertyVisitDoc = (uid:string, property_visit_id:string) => `users/${uid}/property_visits/${property_visit_id}`
 export const customersInteredtedCollection = (uid:string) => `users/${uid}/customers_interested`
+export const conversationsCollection = (uid:string, phoneNumber:string) => `users/${uid}/customers/${phoneNumber}/conversations`
+export const conversationDoc = (uid:string, phoneNumber:string, date:string) => `users/${uid}/customers/${phoneNumber}/conversations/${date}`
+export const messagesCollection = (uid:string, phoneNumber:string, date:string) => `users/${uid}/customers/${phoneNumber}/conversations/${date}/messages`
+
+// Multimai agent collections
+export const multimaiConversationsCollection = (phoneNumber:string) => `agents/multimai/conversations/${phoneNumber}`
+export const multimaiMessagesCollection = (phoneNumber:string) => `agents/multimai/conversations/${phoneNumber}/messages`
