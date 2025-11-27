@@ -11,7 +11,7 @@ import type { WhatsAppWebhookPayload } from '../../entities/ws/ws.dto';
  */
 export const MESSAGE_QUEUE_CONFIG = {
   // Gap in milliseconds to wait before processing accumulated messages
-  GAP_MILLISECONDS: 5000,
+  GAP_MILLISECONDS: process.env.MESSAGE_QUEUE_GAP_MILLISECONDS ? parseInt(process.env.MESSAGE_QUEUE_GAP_MILLISECONDS) : 5000,
 } as const;
 
 interface Message {
