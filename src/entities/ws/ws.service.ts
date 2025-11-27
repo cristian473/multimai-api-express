@@ -42,8 +42,6 @@ async function processWebhookResponse(webhookPayload: WhatsAppWebhookPayload): P
     return false;
   }
 
-  console.log('webhookPayload', webhookPayload);
-
   await sendSeen(webhookPayload);
 
   // Enqueue message for batch processing

@@ -33,7 +33,7 @@ export async function hasToReply(webhookPayload: WhatsAppWebhookPayload): Promis
 
   // Extract customer number
   const customerNumber = payload.fromMe
-    ? extractPhoneFromChatId(payload.to)
+    ? extractPhoneFromChatId(payload._data.key.remoteJidAlt)
     : extractPhoneFromChatId(payload.from);
 
   const conversationKey = buildConversationKey(session, customerNumber);

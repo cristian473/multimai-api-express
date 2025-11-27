@@ -39,7 +39,14 @@ export interface WhatsAppWebhookPayload {
       body: string;
     } | null;
     _data: {
-      key: Record<string, unknown>;
+      key: {
+        remoteJid: string;
+        remoteJidAlt: string;
+        fromMe: boolean;
+        id: string;
+        participant: string;
+        addressingMode: string;
+      };
       messageTimestamp: number;
       pushName: string;
       broadcast: boolean;
