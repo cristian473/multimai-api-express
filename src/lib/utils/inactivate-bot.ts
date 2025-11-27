@@ -11,6 +11,16 @@ import {
   TEMPORAL_BLOCK_CONFIG
 } from './temporal-block-manager';
 import { extractPhoneFromChatId } from './message-helpers';
+import { shouldProcessWorkflow } from "./validation";
+
+export function extractCustomerNumber(webhookPayload: WhatsAppWebhookPayload): string {
+  const { payload } = webhookPayload;
+  console.log('payload', payload);
+  console.log('payload._data.key', payload._data.key);
+  return payload.fromMe 
+      ? extractPhoneFromChatId(payload._data.key.remoteJid) 
+      : extractPhoneFromChatId(payload.from);
+}
 
 /**
  * Determines if the bot should reply to this webhook payload
@@ -32,18 +42,9 @@ export async function hasToReply(webhookPayload: WhatsAppWebhookPayload): Promis
   const isHumanOwnerMessage = payload.fromMe && payload.source !== 'api';
 
   // Extract customer number
-  const customerNumber = payload.fromMe
-    ? extractPhoneFromChatId(payload._data.key.remoteJidAlt)
-    : extractPhoneFromChatId(payload.from);
+  const customerNumber = extractCustomerNumber(webhookPayload);
 
   const conversationKey = buildConversationKey(session, customerNumber);
-
-  console.log('[hasToReply] Analysis:', {
-    isBotMessage,
-    isHumanOwnerMessage,
-    customerNumber,
-    conversationKey
-  });
 
   // Bot talking to customer - don't reply
   if (isBotMessage) {

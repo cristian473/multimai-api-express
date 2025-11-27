@@ -22,6 +22,7 @@ export type AgentConfigData = {
   isActive: boolean;
   agentName:string;
   contactList?: { name: string; phone: string }[];
+  enabledFor?: { name: string; phone: string }[]; // Whitelist: if not empty, only these numbers can interact with the agent
   session?: string;
   reportsNumber?: string;
 };

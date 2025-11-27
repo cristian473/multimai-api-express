@@ -6,7 +6,7 @@
 import { mainGuidelinesWorkflow } from '../../lib/ai/workflows/main-guidelines-workflow';
 import { multimaiWorkflow } from '../../lib/ai/workflows/multimai-workflow';
 import { WhatsAppWebhookPayload, ActivateAgentRequest } from './ws.dto';
-import { hasToReply } from '../../lib/utils/inactivate-bot';
+import { extractCustomerNumber, hasToReply } from '../../lib/utils/inactivate-bot';
 import { processResponse } from '../../lib/utils/response-processor';
 import { wsProxyClient } from '../../lib/other/wsProxyClient';
 import { createMessageQueue, MESSAGE_QUEUE_CONFIG } from '../../lib/utils/message-queue';
@@ -14,6 +14,7 @@ import { db } from '../../lib/db/firebase';
 import { formatChatId, extractPhoneFromChatId } from '../../lib/utils/message-helpers';
 import { withTypingIndicator } from '../../lib/utils/typing-indicator-helper';
 import { sendSeen, startTyping, stopTyping } from '../../lib/utils/whatsapp-status-helpers';
+import { shouldProcessWorkflow } from '../../lib/utils/validation';
 
 // Create message queue instance with centralized configuration
 const enqueueMessage = createMessageQueue({
@@ -39,6 +40,13 @@ async function processWebhookResponse(webhookPayload: WhatsAppWebhookPayload): P
   const shouldReply = await hasToReply(webhookPayload);
   if (!shouldReply) {
     console.log("[Webhook] Bot should not reply");
+    return false;
+  }
+
+  const customerNumber = extractCustomerNumber(webhookPayload);
+  const isValid = await shouldProcessWorkflow(webhookPayload.metadata.uid as string, customerNumber);
+  if (!isValid) {
+    console.log("[Webhook] Customer should not process workflow");
     return false;
   }
 

@@ -72,6 +72,16 @@ console.log({uid})
     return null;
   }
 
+  // If enableFor list exists and is not empty, only allow those numbers
+  const enableForList = userConfig.config.enabledFor;
+  if (enableForList && enableForList.length > 0) {
+    const isAllowed = enableForList.some(contact => contact.phone === userPhone);
+    if (!isAllowed) {
+      console.log('[MultimaiWorkflow] User not in enableFor whitelist');
+      return null;
+    }
+  }
+
   let customer = await getCustomerByPhone(uid, userPhone);
   console.log('customer', customer, {uid, userPhone});
   if (!customer) {
