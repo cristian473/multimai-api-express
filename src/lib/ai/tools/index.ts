@@ -17,6 +17,7 @@ import { getModel } from "../../ai/openrouter";
 import { AI_CONFIG } from "../../ai/config";
 import { cacheFn, cacheSearchFn } from "../../cache";
 import { Propiedad } from "../../db/types";
+import { IExecutionContext } from "../../utils/execution-context";
 
 // Cache para resultados de búsqueda
 const searchResultsCache = new Map<string, string>();
@@ -383,9 +384,7 @@ async function executeRAGSearchInternal(
   }
 
   // Format all reranked properties: return full details if only one, summaries otherwise
-  const formattedSummaries = rerankedProperties.length === 1
-    ? formatPropertyAsText(rerankedProperties[0])
-    : rerankedProperties.map((property) => formatPropertySummary(property)).join("\n\n");
+  const formattedSummaries = rerankedProperties.map((property) => formatPropertySummary(property)).join("\n\n");
 
   const searchId = generateSearchId();
 
@@ -513,7 +512,7 @@ export const searchPropertiesRAGTool = (uid: string, userPhone: string) =>
         }
 
         const propertiesText = propertiesToShow
-          .map((property: Propiedad) => formatPropertyAsText(property))
+          .map((property: Propiedad) => formatPropertySummary(property))
           .join("\n\n---\n\n");
 
         const searchId = generateSearchId();
@@ -670,7 +669,13 @@ export const getTodayDateTool = () =>
   });
 
 // Tool: get_help
-export const getHelpTool = (uid: string, userPhone: string, userName: string) =>
+// Now accepts optional ExecutionContext for deferred message sending
+export const getHelpTool = (
+  uid: string, 
+  userPhone: string, 
+  userName: string,
+  executionContext?: IExecutionContext
+) =>
   tool({
     description:
       "Solicita ayuda de un agente humano para una pregunta compleja. El dueño responderá posteriormente y el cliente será notificado.",
@@ -734,33 +739,68 @@ export const getHelpTool = (uid: string, userPhone: string, userName: string) =>
 
         console.log("[getHelpTool] Request creado:", requestId);
 
-        // Enviar mensaje al dueño por WhatsApp
+        // Prepare message to owner
         const messageToOwner = `Hola!, el número ${userPhone} (${userName}) necesita ayuda con la pregunta:\n\n*${question}*\n\n_Request ID: ${requestId}_`;
 
+        // Save tool execution context (this happens immediately for history)
         await saveConversationMessage(uid, userPhone, 'system', `tool executed: get_help - message to owner: ${messageToOwner}`, undefined, true);
 
-        await wsProxyClient.post(`/ws/send-message`, {
-          chatId: reportsNumber,
-          session: multimaiSession,
-          messages: [
-            {
-              type: "text",
-              payload: {
-                content: messageToOwner,
+        // DEFERRED: Send message to owner - only executes if processing completes
+        // If an ExecutionContext is provided, defer the message sending
+        // This prevents duplicate messages if the execution is aborted
+        if (executionContext) {
+          console.log("[getHelpTool] 📤 Deferring message to owner (will send on completion)");
+          
+          // Use actionId for deduplication - if called multiple times, only last one executes
+          executionContext.addPendingAction(async () => {
+            console.log("[getHelpTool] 📨 Executing deferred: Sending message to owner");
+            
+            await wsProxyClient.post(`/ws/send-message`, {
+              chatId: reportsNumber,
+              session: multimaiSession,
+              messages: [
+                {
+                  type: "text",
+                  payload: {
+                    content: messageToOwner,
+                  },
+                },
+              ],
+            });
+
+            await saveMultimaiMessage(userPhone, 'assistant', messageToOwner);
+            
+            console.log(
+              "[getHelpTool] ✅ Deferred message sent to owner. Request ID:",
+              requestId,
+            );
+          }, `get_help_message_${userPhone}`); // Unique actionId for deduplication
+        } else {
+          // No ExecutionContext - send immediately (backward compatibility)
+          console.log("[getHelpTool] 📨 Sending message to owner immediately (no context)");
+          
+          await wsProxyClient.post(`/ws/send-message`, {
+            chatId: reportsNumber,
+            session: multimaiSession,
+            messages: [
+              {
+                type: "text",
+                payload: {
+                  content: messageToOwner,
+                },
               },
-            },
-          ],
-        });
+            ],
+          });
 
-        await saveMultimaiMessage(userPhone, 'assistant', messageToOwner);
+          await saveMultimaiMessage(userPhone, 'assistant', messageToOwner);
 
-        console.log(
-          "[getHelpTool] ✅ Mensaje enviado al dueño. Request ID:",
-          requestId,
-        );
+          console.log(
+            "[getHelpTool] ✅ Mensaje enviado al dueño. Request ID:",
+            requestId,
+          );
+        }
 
-        // NO iniciar workflow - la respuesta llegará después
-        // Retornar inmediatamente para que el bot pueda continuar
+        // Return response immediately (message sending is deferred)
         return JSON.stringify({
           success: true,
           requestId: requestId,
@@ -1736,9 +1776,18 @@ export const logFeedbackTool = (
 ) =>
   tool({
     description:
-      "Registra el feedback del cliente y envía una notificación al dueño. Usa esta tool cuando el cliente comparta su opinión, experiencia o comentarios sobre una propiedad o el servicio.",
+      "Registra el feedback del cliente incluyendo su calificación y mensaje. Usa esta tool cuando el cliente haya proporcionado una calificación numérica (del 1 al 10) y/o un comentario sobre el servicio.",
     inputSchema: z.object({
-      feedback: z.string().describe("El feedback o comentario del cliente"),
+      rating: z
+        .number()
+        .min(1)
+        .max(10)
+        .optional()
+        .describe("Calificación del cliente del 1 al 10"),
+      feedback: z
+        .string()
+        .optional()
+        .describe("El mensaje o comentario adicional del cliente (opcional si ya dio calificación)"),
       property_id: z
         .string()
         .optional()
@@ -1748,10 +1797,11 @@ export const logFeedbackTool = (
         .optional()
         .describe("Tipo de feedback: property (sobre una propiedad), service (sobre el servicio), visit (sobre una visita), general (comentario general)"),
     }),
-    execute: async ({ feedback, property_id, feedback_type = "general" }) => {
+    execute: async ({ rating, feedback, property_id, feedback_type = "general" }) => {
       try {
         console.log("[logFeedbackTool] Logging feedback");
         console.log("[logFeedbackTool] User:", userName, userPhone);
+        console.log("[logFeedbackTool] Rating:", rating);
         console.log("[logFeedbackTool] Feedback:", feedback);
         console.log("[logFeedbackTool] Type:", feedback_type);
 
@@ -1759,7 +1809,7 @@ export const logFeedbackTool = (
           uid,
           userPhone,
           "system",
-          `tool executed: log_feedback with parameters: ${JSON.stringify({ feedback, property_id, feedback_type })}`,
+          `tool executed: log_feedback with parameters: ${JSON.stringify({ rating, feedback, property_id, feedback_type })}`,
           undefined,
           true
         );
@@ -1780,6 +1830,7 @@ export const logFeedbackTool = (
             name: userName,
             phone: userPhone,
           },
+          rating: rating || null,
           feedback: feedback,
           feedbackType: feedback_type,
           timestamp: new Date(),
@@ -1810,6 +1861,11 @@ export const logFeedbackTool = (
         const multimaiSession = process.env.MULTIMAI_WS_SESSION;
 
         let messageToOwner = `📝 *Nuevo feedback de ${userName}* (${userPhone})\n\n`;
+        
+        if (rating) {
+          messageToOwner += `⭐ *Calificación:* ${rating}/10\n`;
+        }
+        
         messageToOwner += `*Tipo:* ${feedback_type}\n`;
         
         if (property_id && feedbackData.property) {
@@ -1817,7 +1873,10 @@ export const logFeedbackTool = (
           messageToOwner += `*Ubicación:* ${feedbackData.property.location}\n`;
         }
         
-        messageToOwner += `\n*Comentario:*\n${feedback}\n`;
+        if (feedback) {
+          messageToOwner += `\n*Comentario:*\n${feedback}\n`;
+        }
+        
         messageToOwner += `\n_Feedback ID: ${feedbackRef.id}_`;
 
         await saveConversationMessage(
@@ -1844,12 +1903,12 @@ export const logFeedbackTool = (
 
         await saveMultimaiMessage(userPhone, "assistant", messageToOwner);
 
-        console.log("[logFeedbackTool] ✅ Feedback enviado al dueño");
+        console.log("[logFeedbackTool] ✅ Feedback registrado y enviado al dueño");
 
         return JSON.stringify({
           success: true,
           feedback_id: feedbackRef.id,
-          message: "Muchas gracias por tu feedback! Lo he registrado y el dueño será notificado.",
+          rating: rating || null,
         });
       } catch (error) {
         console.error("[logFeedbackTool] ❌ Error:", error);
@@ -1995,7 +2054,7 @@ export const createReminderTool = (
  * Get Visit Status Tool
  * Retrieves detailed information about a scheduled visit
  */
-export const getVisitStatusTool = (uid: string) =>
+export const getVisitStatusTool = (uid: string, userPhone: string) =>
   tool({
     description: "Obtener el estado y detalles completos de una visita programada usando su visit_id. Devuelve información sobre si está activa o cancelada, notas, dirección de la propiedad, fecha y hora.",
     inputSchema: z.object({
@@ -2072,7 +2131,7 @@ export const getVisitStatusTool = (uid: string) =>
 
         await saveConversationMessage(
           uid,
-          visitData?.visitors?.[0]?.phone || 'unknown',
+          userPhone,
           "system",
           `tool executed: get_visit_status - visit queried: ${visit_id}`,
           undefined,
@@ -2083,7 +2142,6 @@ export const getVisitStatusTool = (uid: string) =>
 
         return JSON.stringify({
           success: true,
-          visit: visitStatus,
           message: `Visita ${visit_id}: ${visitStatus.is_cancelled ? 'CANCELADA' : 'ACTIVA'}${visitStatus.date ? ` para el ${visitStatus.date} a las ${visitStatus.time}` : ''}`,
         });
 

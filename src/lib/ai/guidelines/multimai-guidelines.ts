@@ -15,6 +15,42 @@ export const multimaiGuidelines: Guideline[] = [
     scope: 'global',
     tags: ['greeting', 'inicio']
   },
+
+  {
+    id: 'request_missing_info',
+    condition: 'El usuario hace una consulta ambigua o incompleta donde falta información crucial para poder ayudar.',
+    action: 'Solicita amablemente la información faltante de forma específica. NO asumas ni inventes datos. Pregunta de manera concreta qué información necesitas: ¿A qué propiedad te refieres? ¿Qué tipo de propiedad buscas? ¿En qué zona? Mantén un tono amigable y servicial.',
+    priority: 9,
+    difficulty: 'low',
+    tools: [],
+    enabled: true,
+    scope: 'global',
+    tags: ['clarification', 'missing_info', 'context'],
+    validationCriteria: [
+      {
+        name: 'Identificar información faltante',
+        description: 'Detectar correctamente qué dato crucial falta para poder atender la consulta',
+        weight: 20,
+        examples: [
+          '"qué disponibilidad hay" → Falta: propiedad específica o tipo de propiedad',
+          '"cuánto cuesta" → Falta: referencia a qué propiedad',
+          '"quiero agendar" → Falta: qué propiedad visitar',
+          '"me interesa esa" → Falta: contexto de cuál propiedad (si no se mencionó antes)',
+        ]
+      },
+      {
+        name: 'Solicitud amable y específica',
+        description: 'Pedir la información de manera amigable, sin sonar robótico o exigente',
+        weight: 15,
+        examples: [
+          'CORRECTO: "¡Hola! Con gusto te ayudo 😊 ¿Podrías indicarme sobre qué propiedad te gustaría conocer la disponibilidad? O si prefieres, cuéntame qué tipo de propiedad estás buscando."',
+          'CORRECTO: "¡Claro! Para darte información precisa, ¿podrías decirme a qué propiedad te refieres o qué características buscas?"',
+          'INCORRECTO: "Falta información. Especifica la propiedad."',
+          'INCORRECTO: Inventar una propiedad o asumir datos',
+        ]
+      }
+    ]
+  },
   
   {
     id: 'search_properties',
@@ -344,21 +380,44 @@ export const multimaiGuidelines: Guideline[] = [
   },
   {
     id: 'collect_feedback',
-    condition: 'La interacción ha concluido (e.g., después de una búsqueda o visita programada) o el usuario menciona una experiencia pasada',
-    action: 'Pregunta cortésmente por feedback sobre la interacción o la propiedad, y registra la respuesta para el agente humano si aplica',
+    condition: 'La interacción ha concluido (e.g., después de una búsqueda exitosa, visita programada, o consulta resuelta)',
+    action: 'Pregunta explícitamente al usuario: 1) Cómo calificaría la atención recibida del 1 al 10, y 2) Si desea dejar algún mensaje o comentario adicional. NO uses ninguna herramienta aquí, solo recolecta la información.',
     priority: 6,
     difficulty: 'low',
-    tools: ['log_feedback'],
+    tools: [],
     enabled: true,
     scope: 'global',
     tags: ['feedback', 'followup'],
     validationCriteria: [
       {
-        name: 'Feedback',
-        description: 'Verificar que la conversación terminó para pedir feedback',
+        name: 'Feedback Request',
+        description: 'Preguntar explícitamente por calificación del 1 al 10 y si quiere dejar un mensaje',
         weight: 10,
         examples: [
-          'CORRECTO: "Podrias calificar tu experiencia de atención al cliente con una nota de 1 a 5?"',
+          'CORRECTO: "¡Me alegra haberte ayudado! 😊 ¿Podrías calificar la atención recibida del 1 al 10? Y si deseas, puedes dejarme un mensaje o comentario adicional."',
+          'INCORRECTO: Solo preguntar "¿Te fue útil?" sin pedir calificación numérica',
+        ]
+      }
+    ]
+  },
+  {
+    id: 'save_feedback',
+    condition: 'El usuario ha proporcionado una calificación numérica (del 1 al 10) y/o un mensaje de feedback',
+    action: 'Usa la herramienta log_feedback para guardar la calificación y el mensaje del usuario. Luego agradece sinceramente al usuario por su feedback. NO menciones que se notificó al dueño ni que se envió ningún mensaje interno.',
+    priority: 7,
+    difficulty: 'low',
+    tools: ['log_feedback'],
+    enabled: true,
+    scope: 'global',
+    tags: ['feedback', 'save'],
+    validationCriteria: [
+      {
+        name: 'Save and Thank',
+        description: 'Guardar el feedback con log_feedback y agradecer al usuario sin mencionar notificaciones internas',
+        weight: 10,
+        examples: [
+          'CORRECTO: Usar log_feedback y luego decir "¡Muchas gracias por tu feedback! Tu opinión es muy valiosa para nosotros. 🙏"',
+          'INCORRECTO: "Gracias, le he enviado tu mensaje al dueño" o "El dueño será notificado"',
         ]
       }
     ]

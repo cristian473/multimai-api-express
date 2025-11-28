@@ -11,17 +11,17 @@ import {
 import {
   saveConversationMessage,
   generateContextSummary,
-  type ContextSummaryResult
 } from "../../db/repositories/conversations";
 import {
   getUserConfig,
   updateUserAgentConfig,
 } from "../../db/repositories/users";
-import { getHistory } from "../../utils/history";
 import { buildConversationContext } from "../../utils/conversation-helpers";
 import { combineMessages } from "../../utils/message-helpers";
 import type { ConversationContext } from "../types/context";
 import type { ConversationMessage } from "../../db/types";
+import { loadConversationForLLM } from "../context/conversation-loader";
+import type { LLMMessage } from "../context/conversation-loader";
 
 /**
  * Initial validation for AI workflow
@@ -91,18 +91,29 @@ export async function ensureUserConfig(uid: string, session: string) {
 
 /**
  * Save messages to conversation history
+ * @param executionId - Optional execution ID for tracking and potential rollback
  */
 export async function saveMessages(
   uid: string,
   userPhone: string,
-  body: ChatConfig
+  body: ChatConfig,
+  executionId?: string
 ): Promise<void> {
   const { assistantMessage, messages, message, userName } = body;
 
   // Save assistant message first if provided
   if (assistantMessage) {
     console.log("[WorkflowHelper] Saving assistant message from owner");
-    await saveConversationMessage(uid, userPhone, 'assistant', assistantMessage);
+    await saveConversationMessage(
+      uid, 
+      userPhone, 
+      'assistant', 
+      assistantMessage,
+      undefined, // messageId
+      undefined, // isContext
+      undefined, // customerName
+      executionId
+    );
   }
 
   // Save array of messages with IDs
@@ -113,13 +124,31 @@ export async function saveMessages(
         ? `(hace referencia al mensaje: "${msg.replyTo}") ${msg.body}`
         : msg.body;
 
-      await saveConversationMessage(uid, userPhone, 'user', messageContent, msg.id);
+      await saveConversationMessage(
+        uid, 
+        userPhone, 
+        'user', 
+        messageContent, 
+        msg.id,
+        undefined, // isContext
+        undefined, // customerName
+        executionId
+      );
     }
   }
   // Save single message (backward compatibility)
   else if (message) {
     console.log("[WorkflowHelper] Saving single user message");
-    await saveConversationMessage(uid, userPhone, 'user', message);
+    await saveConversationMessage(
+      uid, 
+      userPhone, 
+      'user', 
+      message,
+      undefined, // messageId
+      undefined, // isContext
+      undefined, // customerName
+      executionId
+    );
   }
 }
 
@@ -157,13 +186,13 @@ export async function getConversationContext(
   uid: string,
   userPhone: string,
   session: string
-): Promise<{ context: ConversationContext; history: ConversationMessage[] }> {
-  const history = await getHistory(uid, userPhone);
-  console.log(`[WorkflowHelper] History loaded: ${history.length} messages`);
+): Promise<{ context: ConversationContext; history: LLMMessage[] }> {
+  const {messages} = await loadConversationForLLM(uid, userPhone);
+  console.log(`[WorkflowHelper] History loaded: ${messages.length} messages`);
 
-  const context = buildConversationContext(history, uid, session);
+  const context = buildConversationContext(messages, uid, session);
 
-  return { context, history };
+  return { context, history: messages };
 }
 
 /**

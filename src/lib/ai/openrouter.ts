@@ -19,7 +19,7 @@ export const openrouter = createOpenRouter({
  * @returns OpenRouter model instance
  */
 export function getOpenRouterModel(modelName: string) {
-  return openrouter(modelName, {reasoning: {enabled: true, effort: 'medium'}});
+  return openrouter(modelName, { reasoning: {enabled: true, effort: 'low'} });
 }
 
 export function getModel(modelName: string) {

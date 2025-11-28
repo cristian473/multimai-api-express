@@ -39,6 +39,7 @@ import { getUserContextDocuments } from '../../db/repositories/user-documents';
 import { generateDynamicGuidelines, mergeGuidelines } from '../guidelines/dynamic-guidelines';
 import { ContextSearchAgent, type ContextSearchResult } from '../micro-agents/context-search-agent';
 import { AgentConfigData, AgentBusinessData } from "../../db/types";
+import { ExecutionContext, createNoOpExecutionContext, IExecutionContext } from '../../utils/execution-context';
 
 export interface WorkflowResult {
   message: string;
@@ -57,8 +58,15 @@ export interface WorkflowContext {
 
 /**
  * Registers all tools with the guideline agent
+ * @param executionContext - Optional execution context for tools that support deferred actions
  */
-function registerTools(agent: GuidelineAgent, uid: string, userPhone: string, userName: string): void {
+function registerTools(
+  agent: GuidelineAgent, 
+  uid: string, 
+  userPhone: string, 
+  userName: string,
+  executionContext?: IExecutionContext
+): void {
   agent.registerTool(
     'search_properties',
     'Buscar propiedades según criterios del usuario',
@@ -94,10 +102,11 @@ function registerTools(agent: GuidelineAgent, uid: string, userPhone: string, us
     ['schedule_new_visit']
   );
 
+  // get_help tool with ExecutionContext for deferred message sending
   agent.registerTool(
     'get_help',
     'Solicitar ayuda de un agente humano',
-    getHelpTool(uid, userPhone, userName),
+    getHelpTool(uid, userPhone, userName, executionContext),
     ['get_human_help']
   );
 
@@ -139,7 +148,7 @@ function registerTools(agent: GuidelineAgent, uid: string, userPhone: string, us
   agent.registerTool(
     'get_visit_status',
     'Consultar el estado y detalles de una visita programada',
-    getVisitStatusTool(uid),
+    getVisitStatusTool(uid, userPhone),
     ['check_visit_status', 'cancel_visit', 'reschedule_visit']
   );
 
@@ -217,17 +226,31 @@ function registerContextVariables(
 
 /**
  * Main workflow using guidelines-based agent system
+ * 
+ * @param uid - User ID
+ * @param session - WhatsApp session
+ * @param body - Chat configuration with message data
+ * @param workflowContext - Optional workflow context (e.g., isFromActivateAgent)
+ * @param executionContext - Optional execution context for cancellation and deferred actions
  */
 export async function mainGuidelinesWorkflow(
   uid: string,
   session: string,
   body: ChatConfig,
-  workflowContext: WorkflowContext = {}
+  workflowContext: WorkflowContext = {},
+  executionContext?: IExecutionContext
 ): Promise<WorkflowResult | null> {
   const { userPhone, userName } = body;
+  
+  // Use provided context or create a no-op one for backward compatibility
+  const execCtx = executionContext || createNoOpExecutionContext();
+  const executionId = execCtx.executionId !== 'no-op' ? execCtx.executionId : undefined;
 
   console.log("\n========== GUIDELINES WORKFLOW START ==========");
   console.log(`User: ${userName} (${userPhone})`);
+  if (executionId) {
+    console.log(`[Workflow] ExecutionId: ${executionId}`);
+  }
 
   // ========== STEP 1: Validation ==========
   const isValid = await validateWorkflowInput(uid, body);
@@ -247,10 +270,19 @@ export async function mainGuidelinesWorkflow(
   }
 
   // ========== STEP 4: Save Messages ==========
-  await saveMessages(uid, userPhone, body);
+  await saveMessages(uid, userPhone, body, executionId);
+
+  // Check if aborted after saving messages
+  if (execCtx.isAborted()) {
+    console.log("[Workflow] ⚠️ Execution aborted after saving messages");
+    return null;
+  }
 
   // ========== STEP 5: Get Conversation Context ==========
   const { context: conversationContext, history } = await getConversationContext(uid, userPhone, session);
+
+  console.log(`[Workflow] Conversation context: ${JSON.stringify(conversationContext, null, 2)}`);
+  console.log(`[Workflow] Conversation history: ${JSON.stringify(history, null, 2)}`);
 
   // ========== STEP 6: Quick Response (if not from activate agent) ==========
   if (!workflowContext.isFromActivateAgent) {
@@ -275,7 +307,8 @@ export async function mainGuidelinesWorkflow(
   );
 
   // ========== STEP 9: Register Tools and Variables ==========
-  registerTools(agent, uid, userPhone, userName);
+  // Pass executionContext to tools that support deferred actions (like getHelpTool)
+  registerTools(agent, uid, userPhone, userName, execCtx);
   registerContextVariables(agent, userName, userPhone, userConfig);
 
   // ========== STEP 10: Load User Documents and Generate Dynamic Guidelines ==========
@@ -354,6 +387,12 @@ export async function mainGuidelinesWorkflow(
     }
   }
 
+  // Check if aborted before expensive reasoning
+  if (execCtx.isAborted()) {
+    console.log("[Workflow] ⚠️ Execution aborted before chain of thought");
+    return null;
+  }
+
   // ========== STEP 15: Chain of Thought Reasoning ==========
   console.log('[Workflow] Generating chain of thought reasoning...');
   const availableTools = agent.getRegisteredTools();
@@ -400,6 +439,12 @@ export async function mainGuidelinesWorkflow(
 
   console.log('[Workflow] Response generated');
 
+  // Check if aborted after main processing
+  if (execCtx.isAborted()) {
+    console.log("[Workflow] ⚠️ Execution aborted after processing - not saving response");
+    return null;
+  }
+
   // ========== STEP 17: Save Tool Executions as Context Messages ==========
   const toolExecutions = result.executionTrace.filter((t: any) => t.step === 'tool_execution');
   
@@ -416,13 +461,16 @@ export async function mainGuidelinesWorkflow(
         }, null, 2);
         
         // Save as context message (isContext: true) with system role
+        // Include executionId for potential rollback
         await saveConversationMessage(
           uid, 
           userPhone, 
           'system', // Use system role for context/tool results
           `[Tool: ${execution.toolName}]\n${contextContent}`,
           undefined, // No messageId
-          true // isContext flag
+          true, // isContext flag
+          undefined, // customerName
+          executionId // executionId for rollback
         );
       } catch (err) {
         console.error(`[Workflow] Error saving tool execution ${execution.toolName}:`, err);
@@ -431,7 +479,16 @@ export async function mainGuidelinesWorkflow(
   }
 
   // ========== STEP 18: Save Assistant Response ==========
-  await saveConversationMessage(uid, userPhone, 'assistant', result.response);
+  await saveConversationMessage(
+    uid, 
+    userPhone, 
+    'assistant', 
+    result.response,
+    undefined, // messageId
+    undefined, // isContext
+    undefined, // customerName
+    executionId // executionId for rollback
+  );
 
   console.log("========== GUIDELINES WORKFLOW END ==========\n");
 

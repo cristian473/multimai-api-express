@@ -1,9 +1,15 @@
 /**
  * Sistema de cola de mensajes para WhatsApp con funcionalidad de debounce,
  * que acumula mensajes entrantes y los procesa en batch para la IA.
+ * 
+ * Features:
+ * - Message accumulation with debounce timer
+ * - Cancellation support: new messages abort current processing
+ * - ExecutionContext for deferred actions and cleanup
  */
 
 import { formatUserMessage } from './message-helpers';
+import { ExecutionContext, createExecutionContext } from './execution-context';
 import type { WhatsAppWebhookPayload } from '../../entities/ws/ws.dto';
 
 /**
@@ -40,11 +46,26 @@ export interface AccumulatedMessagesPayload {
   userName: string;
 }
 
+/**
+ * Callback context passed to the processing function
+ */
+export interface ProcessingContext {
+  payload: AccumulatedMessagesPayload;
+  executionContext: ExecutionContext;
+}
+
+/**
+ * Callback type for message processing
+ */
+export type MessageProcessingCallback = (context: ProcessingContext) => Promise<void>;
+
 interface UserQueue {
   messages: Message[];
   timer: NodeJS.Timeout | null;
-  callback: ((accumulatedPayload: AccumulatedMessagesPayload) => void) | null;
-  isProcessing: boolean; // Mutex flag
+  callback: MessageProcessingCallback | null;
+  isProcessing: boolean;
+  abortController: AbortController | null;
+  currentExecutionContext: ExecutionContext | null;
 }
 
 interface QueueState {
@@ -57,6 +78,20 @@ interface QueueState {
 function createInitialState(): QueueState {
   return {
     queues: new Map(),
+  };
+}
+
+/**
+ * Creates an empty user queue
+ */
+function createEmptyUserQueue(): UserQueue {
+  return {
+    messages: [],
+    timer: null,
+    callback: null,
+    isProcessing: false,
+    abortController: null,
+    currentExecutionContext: null,
   };
 }
 
@@ -104,14 +139,143 @@ export function getUserMessage(
 }
 
 /**
- * Creates a message queue with debouncing functionality
+ * Creates a message queue with debouncing and cancellation functionality
+ * 
+ * Behavior:
+ * - Messages are accumulated during the gap period
+ * - When a new message arrives during processing, current processing is aborted
+ * - Aborted processing triggers cleanup (delete messages with executionId)
+ * - After abort cleanup, a new timer is started to reprocess accumulated messages
+ * - Only on successful completion are pending actions executed
  */
 export function createMessageQueue(config: QueueConfig) {
   const state: QueueState = createInitialState();
 
+  /**
+   * Starts a new processing timer for a user queue
+   */
+  function startProcessingTimer(from: string, callback: MessageProcessingCallback): void {
+    const currentQueue = state.queues.get(from);
+    if (!currentQueue) return;
+
+    // Clear any existing timer
+    if (currentQueue.timer) {
+      clearTimeout(currentQueue.timer);
+      currentQueue.timer = null;
+    }
+
+    console.log(`[MessageQueue] 🕐 Starting processing timer for ${from} (${config.gapMilliseconds}ms)`);
+
+    currentQueue.timer = setTimeout(async () => {
+      await processQueueForUser(from, callback);
+    }, config.gapMilliseconds);
+
+    state.queues.set(from, currentQueue);
+  }
+
+  /**
+   * Main processing function for a user's queued messages
+   */
+  async function processQueueForUser(from: string, callback: MessageProcessingCallback): Promise<void> {
+    const currentQueue = state.queues.get(from);
+    if (!currentQueue || currentQueue.messages.length === 0) {
+      console.log(`[MessageQueue] No messages to process for ${from}`);
+      return;
+    }
+
+    // Don't start new processing if already processing
+    if (currentQueue.isProcessing) {
+      console.log(`[MessageQueue] Skipping - already processing for ${from}`);
+      return;
+    }
+
+    // Create new AbortController and ExecutionContext for this processing cycle
+    const abortController = new AbortController();
+    const executionContext = createExecutionContext(abortController);
+
+    // Set processing state
+    currentQueue.isProcessing = true;
+    currentQueue.abortController = abortController;
+    currentQueue.currentExecutionContext = executionContext;
+    currentQueue.timer = null; // Timer has fired
+    state.queues.set(from, currentQueue);
+
+    console.log(
+      `[MessageQueue] 🚀 Processing ${currentQueue.messages.length} accumulated message(s) for ${from} [executionId: ${executionContext.executionId}]`
+    );
+
+    const accumulatedPayload = processQueue(currentQueue.messages);
+
+    try {
+      await callback({
+        payload: accumulatedPayload,
+        executionContext,
+      });
+
+      // Check if aborted during execution
+      if (executionContext.isAborted()) {
+        console.log(`[MessageQueue] ⚠️ Execution was aborted for ${from} - keeping messages in queue`);
+        // Run cleanup (delete messages with this executionId)
+        await executionContext.runCleanup();
+        
+        // Reset processing state but KEEP messages
+        const queueAfterAbort = state.queues.get(from);
+        if (queueAfterAbort) {
+          queueAfterAbort.isProcessing = false;
+          queueAfterAbort.abortController = null;
+          queueAfterAbort.currentExecutionContext = null;
+          // NOTE: Messages are kept in queue
+          state.queues.set(from, queueAfterAbort);
+
+          // CRITICAL: Start new timer to reprocess messages if there are any
+          if (queueAfterAbort.messages.length > 0 && queueAfterAbort.callback) {
+            console.log(`[MessageQueue] 🔄 Restarting timer to process ${queueAfterAbort.messages.length} message(s) for ${from}`);
+            startProcessingTimer(from, queueAfterAbort.callback);
+          }
+        }
+      } else {
+        // SUCCESS: Execute pending actions and reset queue
+        console.log(`[MessageQueue] ✅ Execution completed successfully for ${from}`);
+        
+        // Execute pending actions (like sending messages to owner)
+        await executionContext.executePendingActions();
+
+        // Reset queue completely
+        state.queues.set(from, createEmptyUserQueue());
+      }
+    } catch (error) {
+      console.error(`[MessageQueue] ❌ Error processing messages for ${from}:`, error);
+      
+      // Check if error was due to abort
+      if (executionContext.isAborted()) {
+        console.log(`[MessageQueue] Error was due to abort - running cleanup`);
+        await executionContext.runCleanup();
+        
+        // Keep messages for retry
+        const queueAfterError = state.queues.get(from);
+        if (queueAfterError) {
+          queueAfterError.isProcessing = false;
+          queueAfterError.abortController = null;
+          queueAfterError.currentExecutionContext = null;
+          state.queues.set(from, queueAfterError);
+
+          // CRITICAL: Start new timer to reprocess messages
+          if (queueAfterError.messages.length > 0 && queueAfterError.callback) {
+            console.log(`[MessageQueue] 🔄 Restarting timer after abort error for ${from}`);
+            startProcessingTimer(from, queueAfterError.callback);
+          }
+        }
+      } else {
+        // Non-abort error - still run cleanup and reset
+        await executionContext.runCleanup();
+        state.queues.set(from, createEmptyUserQueue());
+      }
+    }
+  }
+
   return function enqueueMessage(
     webhookPayload: WhatsAppWebhookPayload,
-    callback: (accumulatedPayload: AccumulatedMessagesPayload) => void,
+    callback: MessageProcessingCallback,
   ): void {
     const from = webhookPayload.payload.from;
     const messageBody = webhookPayload.payload.body;
@@ -125,23 +289,22 @@ export function createMessageQueue(config: QueueConfig) {
     // Get or create user queue
     let userQueue = state.queues.get(from);
     if (!userQueue) {
-      userQueue = {
-        messages: [],
-        timer: null,
-        callback: null,
-        isProcessing: false
-      };
+      userQueue = createEmptyUserQueue();
       state.queues.set(from, userQueue);
     }
 
-    // Check if already processing (mutex)
-    if (userQueue.isProcessing) {
-      console.log(`[MessageQueue] Queue for ${from} is currently processing, enqueueing message`);
-      // Still add message to queue, it will be processed in next batch
+    // CRITICAL: If currently processing, abort the current execution
+    if (userQueue.isProcessing && userQueue.abortController) {
+      console.log(`[MessageQueue] ⚠️ New message arrived during processing for ${from} - ABORTING current execution`);
+      userQueue.abortController.abort();
+      // The cleanup will happen in processQueueForUser and a new timer will be started
     }
 
-    // Reset existing timer
-    userQueue = resetTimer(userQueue);
+    // Reset existing timer (if any) - we'll start a new one
+    if (userQueue.timer) {
+      clearTimeout(userQueue.timer);
+      userQueue.timer = null;
+    }
 
     // Format and add message
     const formattedMessage = formatUserMessage(
@@ -158,50 +321,30 @@ export function createMessageQueue(config: QueueConfig) {
     });
     userQueue.callback = callback;
 
-    console.log(`[MessageQueue] Enqueued message for ${from}. Total in queue: ${userQueue.messages.length}`);
-
-    // Set new timer for batch processing
-    userQueue.timer = setTimeout(() => {
-      const currentQueue = state.queues.get(from);
-      if (!currentQueue || currentQueue.messages.length === 0) {
-        return;
-      }
-
-      // Set processing flag (mutex)
-      currentQueue.isProcessing = true;
-
-      console.log(
-        `[MessageQueue] Processing ${currentQueue.messages.length} accumulated message(s) for ${from}`
-      );
-
-      const accumulatedPayload = processQueue(currentQueue.messages);
-
-      // Execute callback
-      if (currentQueue.callback) {
-        Promise.resolve(currentQueue.callback(accumulatedPayload))
-          .catch((error: Error) => {
-            console.error(`[MessageQueue] Error processing messages for ${from}:`, error);
-          })
-          .finally(() => {
-            // Reset queue after processing
-            state.queues.set(from, {
-              messages: [],
-              timer: null,
-              callback: null,
-              isProcessing: false
-            });
-          });
-      } else {
-        // No callback, just reset
-        state.queues.set(from, {
-          messages: [],
-          timer: null,
-          callback: null,
-          isProcessing: false
-        });
-      }
-    }, config.gapMilliseconds);
+    console.log(`[MessageQueue] 📥 Enqueued message for ${from}. Total in queue: ${userQueue.messages.length}`);
 
     state.queues.set(from, userQueue);
+
+    // Start processing timer (only if not currently processing)
+    // If processing, the timer will be started after abort cleanup
+    if (!userQueue.isProcessing) {
+      startProcessingTimer(from, callback);
+    } else {
+      console.log(`[MessageQueue] ⏳ Message added to queue - will process after current execution aborts`);
+    }
+  };
+}
+
+/**
+ * Legacy callback adapter for backward compatibility
+ * Wraps old-style callbacks to work with new ExecutionContext system
+ */
+export function wrapLegacyCallback(
+  legacyCallback: (payload: AccumulatedMessagesPayload) => Promise<void>
+): MessageProcessingCallback {
+  return async (context: ProcessingContext) => {
+    // For legacy callbacks, we just ignore the ExecutionContext
+    // This means no cancellation or pending action support
+    await legacyCallback(context.payload);
   };
 }

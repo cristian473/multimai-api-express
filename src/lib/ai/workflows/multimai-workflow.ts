@@ -7,12 +7,23 @@ import { getUserConfig } from '../../db/repositories/users';
 import { getUserByReportNumber } from '../../db/repositories/users';
 import { identifyUserType } from '../utils/user-identifier';
 import { tenantWorkflow } from './tenant-workflow';
+import { IExecutionContext, createNoOpExecutionContext } from '../../utils/execution-context';
 
 export interface MultimaiWorkflowResult {
   message: string;
 }
 
-export async function multimaiWorkflow(body: ChatConfig): Promise<MultimaiWorkflowResult | null> {
+/**
+ * Multimai workflow for handling incoming messages
+ * @param body - Chat configuration with message data
+ * @param executionContext - Optional execution context for cancellation support
+ */
+export async function multimaiWorkflow(
+  body: ChatConfig,
+  executionContext?: IExecutionContext
+): Promise<MultimaiWorkflowResult | null> {
+  // Use provided context or create a no-op one for backward compatibility
+  const execCtx = executionContext || createNoOpExecutionContext();
   const { userPhone, message, userName, messageReferencesTo, messageReferencesToProduct } = body;
 
   if (!userPhone) {
@@ -115,10 +126,22 @@ console.log({uid})
 
   console.log('[MultimaiWorkflow] Messages:', messages);
 
+  // Check if aborted before expensive AI call
+  if (execCtx.isAborted()) {
+    console.log('[MultimaiWorkflow] ⚠️ Execution aborted before AI processing');
+    return null;
+  }
+
   const businessName = userConfig.business.businessName || "Inmobiliaria";
 
   // Ejecutar el agente de requests (Multimai)
   const aiResponse = await runRequestsAgent(messages, businessName, message || '');
+
+  // Check if aborted after AI call
+  if (execCtx.isAborted()) {
+    console.log('[MultimaiWorkflow] ⚠️ Execution aborted after AI processing - not saving');
+    return null;
+  }
 
   // Guardar mensajes en Firestore
   if (message) {

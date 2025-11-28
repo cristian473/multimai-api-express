@@ -9,7 +9,7 @@ export const AI_CONFIG = {
   GLOSSARY_MODEL: 'openai/gpt-4o-mini',      // Extraction of relevant terms (cost-efficient)
   MATCHING_MODEL: 'groq/openai/gpt-oss-120b',// Semantic evaluation (high accuracy)
   // COMPOSER_MODEL: 'openai/gpt-4o-mini',      // Response generation (high quality) - default
-  CRITIQUE_MODEL: 'x-ai/grok-4-fast',      // Self-critique (optional, cost-efficient)
+  CRITIQUE_MODEL: 'groq/openai/gpt-oss-120b',      // Self-critique (optional, cost-efficient)
   REANKING_MODEL: 'groq/openai/gpt-oss-20b',      // Reranking model (optional, cost-efficient)
   EMBEDDING_MODEL: 'text-embedding-3-small', // Embeddings model
   QUICK_RESPONSE_MODEL: 'groq/openai/gpt-oss-120b', // Quick waiting messages (very fast, cost-efficient)
@@ -25,7 +25,7 @@ export const AI_CONFIG = {
   // Models by difficulty level
   COMPOSER_MODEL_LOW: 'openai/gpt-4o-mini',     // Simple tasks (greetings, basic info)
   COMPOSER_MODEL_MEDIUM: 'x-ai/grok-4-fast',  // Standard tasks (searches, basic queries)
-  COMPOSER_MODEL_HIGH: 'x-ai/grok-4-fast',   // Complex tasks (scheduling, negotiations, escalations)
+  COMPOSER_MODEL_HIGH: 'x-ai/grok-4.1-fast:free',   // Complex tasks (scheduling, negotiations, escalations)
   
   // Thresholds and limits
   GUIDELINE_THRESHOLD: 0.6,           // Minimum score to activate guideline

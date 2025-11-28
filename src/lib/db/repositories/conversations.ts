@@ -101,6 +101,8 @@ async function getOrCreateActiveConversation(
  * Save a message to the active conversation (new schema)
  * Automatically schedules conversation close job after 60 minutes
  * Uses messageId as document ID when provided to avoid duplicates
+ * 
+ * @param executionId - Optional execution ID for tracking messages that can be rolled back on abort
  */
 export async function saveConversationMessage(
   uid: string,
@@ -109,14 +111,15 @@ export async function saveConversationMessage(
   content: string,
   messageId?: string,
   isContext?: boolean,
-  customerName?: string
+  customerName?: string,
+  executionId?: string
 ): Promise<void> {
 
-  console.log('saveConversationMessage', { uid, phone, role, content, messageId, isContext, customerName });
+  console.log('saveConversationMessage', { uid, phone, role, content, messageId, isContext, customerName, executionId });
   // Get or create active conversation
   const { conversationId, isNew } = await getOrCreateActiveConversation(uid, phone, customerName);
 
-  logger.info(`[Conversations] Saving ${role} message to conversation ${conversationId} (isContext: ${isContext || false})`);
+  logger.info(`[Conversations] Saving ${role} message to conversation ${conversationId} (isContext: ${isContext || false}, executionId: ${executionId || 'none'})`);
 
   // Save message
   const messageData: any = {
@@ -131,6 +134,11 @@ export async function saveConversationMessage(
 
   if (isContext) {
     messageData.isContext = true;
+  }
+
+  // Add executionId for tracking and potential rollback
+  if (executionId) {
+    messageData.executionId = executionId;
   }
 
   const messagesCollection = db.collection(getMessagesCollection(uid, phone, conversationId));
@@ -442,6 +450,7 @@ export async function getPreviousConversationSummaries(
     }));
   } catch (error) {
     logger.err("[Conversations] Error getting previous conversation summaries:", error);
+    console.error('error', error);
     return [];
   }
 }
@@ -716,4 +725,81 @@ Responde ÚNICAMENTE en formato JSON (sin markdown ni bloques de código):
       toolsExecuted: [],
     };
   }
+}
+
+/**
+ * Delete all messages with a specific executionId
+ * Used for cleanup when a message processing is aborted
+ * 
+ * @param uid - User ID
+ * @param phone - Customer phone number
+ * @param executionId - The execution ID to match
+ * @returns Number of messages deleted
+ */
+export async function deleteMessagesByExecutionId(
+  uid: string,
+  phone: string,
+  executionId: string
+): Promise<number> {
+  let deletedCount = 0;
+
+  try {
+    logger.info(`[Conversations] Deleting messages with executionId: ${executionId} for ${phone}`);
+
+    // Get all conversations for this customer
+    const conversationsSnapshot = await db
+      .collection(`users/${uid}/customers/${phone}/conversations`)
+      .get();
+
+    if (conversationsSnapshot.empty) {
+      logger.info(`[Conversations] No conversations found for ${phone}`);
+      return 0;
+    }
+
+    // Use batch for efficient deletion
+    const batch = db.batch();
+    let batchCount = 0;
+    const MAX_BATCH_SIZE = 500; // Firestore limit
+
+    for (const convDoc of conversationsSnapshot.docs) {
+      // Query messages with matching executionId
+      const messagesSnapshot = await db
+        .collection(`users/${uid}/customers/${phone}/conversations/${convDoc.id}/messages`)
+        .where("executionId", "==", executionId)
+        .get();
+
+      for (const msgDoc of messagesSnapshot.docs) {
+        batch.delete(msgDoc.ref);
+        batchCount++;
+        deletedCount++;
+
+        // Commit batch if approaching limit
+        if (batchCount >= MAX_BATCH_SIZE) {
+          await batch.commit();
+          batchCount = 0;
+        }
+      }
+    }
+
+    // Commit remaining items
+    if (batchCount > 0) {
+      await batch.commit();
+    }
+
+    logger.info(`[Conversations] Deleted ${deletedCount} messages with executionId: ${executionId}`);
+    return deletedCount;
+  } catch (error) {
+    logger.err(`[Conversations] Error deleting messages by executionId ${executionId}:`, error);
+    return deletedCount;
+  }
+}
+
+/**
+ * Create a cleanup function for ExecutionContext
+ * Returns a function that deletes messages with the given executionId
+ */
+export function createMessageCleanupFn(uid: string, phone: string): (executionId: string) => Promise<void> {
+  return async (executionId: string) => {
+    await deleteMessagesByExecutionId(uid, phone, executionId);
+  };
 }

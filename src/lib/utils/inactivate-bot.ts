@@ -33,7 +33,8 @@ export function extractCustomerNumber(webhookPayload: WhatsAppWebhookPayload): s
 export async function hasToReply(webhookPayload: WhatsAppWebhookPayload): Promise<boolean> {
   const { payload, session, metadata, event } = webhookPayload;
 
-  if(!event.includes('message')) {
+  // Handle missing or undefined event
+  if(!event || !event.includes('message')) {
     return false;
   }
 

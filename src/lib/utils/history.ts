@@ -73,38 +73,5 @@ export async function getMultimaiHistory(userPhone: string): Promise<ChatMessage
   return conversationHistory;
 }
 
-/**
- * Get only previous conversation summaries (for context injection)
- * 
- * @deprecated Use loadConversationForLLM with includePreviousSummaries option
- */
-export async function getPreviousSummariesContext(uid: string, userPhone: string): Promise<string | null> {
-  try {
-    const result = await loadConversationForLLM(uid, userPhone, {
-      includeContextMessages: false,
-      includePreviousSummaries: true,
-      maxPreviousSummaries: 5,
-      maxMessages: 1, // Only get the summaries system message
-      filterRoles: ['system'],
-    });
-
-    const summaryMessage = result.messages.find(
-      (m) => m.role === 'system' && m.content.includes('Contexto de conversaciones anteriores')
-    );
-
-    if (summaryMessage) {
-      // Extract just the summaries part without the header
-      const content = summaryMessage.content;
-      const headerEnd = content.indexOf('\n');
-      return headerEnd > 0 ? content.substring(headerEnd + 1) : content;
-    }
-
-    return null;
-  } catch (error) {
-    logger.err(`[History] Error loading previous summaries: ${error}`);
-    return null;
-  }
-}
-
 // Re-export from conversation-loader for convenience
 export { loadConversationForLLM, getMessagesForLLM, type LLMMessage };

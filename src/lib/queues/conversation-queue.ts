@@ -28,6 +28,17 @@ interface ConversationCloseJobData {
   scheduledAt: number;
 }
 
+// Simplified conversation summary schema - list of propositions
+const conversationSummarySchema = z.object({
+  propositions: z.array(z.string()).describe(
+    'Lista ordenada de proposiciones que describen lo ocurrido en la conversación. ' +
+    'Cada proposición debe ser una oración completa que incluya IDs, acciones, datos y resultados relevantes. ' +
+    'Ordenadas cronológicamente según la ejecución.'
+  ),
+});
+
+type ConversationSummaryResult = z.infer<typeof conversationSummarySchema>;
+
 // Lead analysis schema - enriched with preferences, properties viewed, and categorized tags
 const leadAnalysisSchema = z.object({
   // BANT scores
@@ -271,6 +282,93 @@ async function getConversationMessages(
 }
 
 /**
+ * Generate conversation summary as a list of propositions
+ * Each proposition describes an action, query, or data exchange in order of execution
+ */
+async function generateDetailedSummary(
+  messages: Array<{ role: string; content: string; timestamp: any; isContext?: boolean }>,
+  customerName: string
+): Promise<ConversationSummaryResult | null> {
+  try {
+    if (messages.length === 0) {
+      logger.info('[ConversationQueue] No messages to summarize');
+      return null;
+    }
+
+    // Separate context messages (tool executions) from conversation messages
+    const contextMessages = messages.filter((m) => m.isContext || m.content.includes('tool executed:'));
+    const conversationMessages = messages.filter(
+      (m) => !m.isContext && !m.content.includes('tool executed:') && m.role !== 'system'
+    );
+
+    // Format conversation messages
+    const formattedConversation = conversationMessages
+      .map((m) => `${m.role === 'user' ? customerName : 'Asistente'}: ${m.content}`)
+      .join('\n');
+
+    // Format context messages (tool executions with details)
+    const formattedContext = contextMessages
+      .map((m) => m.content)
+      .join('\n');
+
+    const prompt = `<task>
+Genera proposiciones CONCISAS y TÉCNICAS de lo ocurrido en la conversación. Enfócate en acciones y datos.
+
+<reglas>
+1. Máximo 15-20 palabras por proposición
+2. SIEMPRE incluir IDs exactos (property_id, visit_id) cuando estén en los logs
+3. Formato técnico con metadata clara entre corchetes
+4. Solo acciones relevantes, no saludos ni cortesías
+5. Incluir: herramienta usada, parámetros clave, resultado, IDs
+6. Usar formato [metadata] para datos importantes
+</reglas>
+
+<formato_ejemplo>
+- "Usuario solicita alquiler en Pacheco."
+- "Búsqueda (search_properties_rag): alquiler, Pacheco. [resultados: 1]"
+- "Propiedad mostrada: Casa Pacheco [property_id: abc123] [precio: $1.230.000/mes] [2 dorm, 1 baño]"
+- "Usuario solicita visita para próxima semana."
+- "Visita cancelada (cancel_visit): [property_id: abc123] [fecha: 28/11 11:00hs]"
+- "Nueva visita creada (create_new_property_visit): [property_id: abc123] [fecha: 01/12 18:00hs] [visit_id: xyz789]"
+- "Consulta al dueño (get_help): disponibilidad 01/12 18:00hs [property_id: abc123]"
+- "Dueño confirma disponibilidad. Visita confirmada."
+- "Intereses usuario: [operación: alquiler] [tipo: casa] [zona: Pacheco]"
+</formato_ejemplo>
+
+<conversacion>
+${formattedConversation}
+</conversacion>
+
+<logs_herramientas>
+${formattedContext || 'Sin herramientas ejecutadas'}
+</logs_herramientas>
+
+<importante>
+- Extrae IDs EXACTOS de los logs (property_id, visit_id, etc.)
+- Si un ID aparece en los logs, DEBE aparecer en la proposición entre [corchetes]
+- No incluyas saludos, despedidas ni conversación trivial
+- Prioriza: búsquedas, propiedades mostradas, visitas, consultas al dueño
+- Usa [corchetes] para metadata: IDs, precios, fechas, cantidades
+</importante>
+</task>`;
+
+    const model = getModel(AI_CONFIG?.LEAD_QUALIFICATION_MODEL ?? 'openai/gpt-4o-mini');
+    const { object: result } = await generateObject({
+      model: model as any,
+      schema: conversationSummarySchema,
+      prompt,
+      temperature: 0.2,
+    });
+
+    return result;
+  } catch (error) {
+    logger.err('[ConversationQueue] Error generating detailed summary:', error);
+    console.log('error generating summary', error);
+    return null;
+  }
+}
+
+/**
  * Analyze lead using AI with enriched schema
  */
 async function analyzeLead(
@@ -434,23 +532,33 @@ async function closeConversation(data: ConversationCloseJobData): Promise<boolea
     // Get messages from this conversation for summary
     const conversationMessages = await getConversationMessages(uid, phone, conversationId);
     
-    console.log('conversationMessages', conversationMessages);
+    console.log('conversationMessages', conversationMessages.length);
     // Get ALL messages from ALL conversations for full BANT analysis
     const allMessages = await getAllCustomerMessages(uid, phone);
 
-    console.log('allMessages', allMessages);
+    console.log('allMessages', allMessages.length);
 
-    // Generate summary if enough messages in this conversation
-    let summary: string | undefined;
-    const nonContextMessages = conversationMessages.filter(
-      (m) => !m.isContext && !m.content.includes('tool executed:') && m.role !== 'system'
-    );
+    // Generate detailed summary for this conversation
+    logger.info(`[ConversationQueue] Generating detailed summary for conversation ${conversationId}`);
+    const detailedSummary = await generateDetailedSummary(conversationMessages, customerName || phone);
 
-    // Close the conversation
-    await conversationRef.update({
+    // Close the conversation with detailed summary
+    const conversationUpdateData: Record<string, any> = {
       isOpen: false,
       closedAt: FieldValue.serverTimestamp(),
-    });
+    };
+
+    // Add summary as joined propositions text
+    if (detailedSummary && detailedSummary.propositions.length > 0) {
+      // Join propositions with line breaks to create a readable summary text
+      const summaryText = detailedSummary.propositions.join('\n');
+      conversationUpdateData.summary = summaryText;
+      
+      logger.info(`[ConversationQueue] Summary generated with ${detailedSummary.propositions.length} propositions`);
+      logger.info(`[ConversationQueue] Summary preview: ${summaryText.substring(0, 200)}...`);
+    }
+
+    await conversationRef.update(conversationUpdateData);
 
     // Clear activeConversationId from customer
     const customerRef = db.doc(`users/${uid}/customers/${phone}`);
@@ -459,27 +567,20 @@ async function closeConversation(data: ConversationCloseJobData): Promise<boolea
       updatedAt: FieldValue.serverTimestamp(),
     });
 
-    // Skip analysis if not enough messages
+    // Skip lead analysis if not enough messages
     const userMessages = allMessages.filter((m) => m.role === 'user' && !m.isContext);
     if (userMessages.length < 2) {
-      logger.info(`[ConversationQueue] Not enough messages for analysis (${userMessages.length})`);
+      logger.info(`[ConversationQueue] Not enough messages for lead analysis (${userMessages.length})`);
       return true;
     }
 
-    // Analyze the lead
+    // Analyze the lead (BANT scoring)
     logger.info(`[ConversationQueue] Analyzing lead ${phone} with ${allMessages.length} total messages`);
     const analysis = await analyzeLead(allMessages, customerName || phone);
 
     if (!analysis) {
       logger.err(`[ConversationQueue] Failed to analyze lead ${phone}`);
       return true; // Conversation was closed, just no analysis
-    }
-
-    // Update conversation with summary if generated
-    if (nonContextMessages.length >= MIN_MESSAGES_FOR_SUMMARY) {
-      await conversationRef.update({
-        summary: analysis.summary,
-      });
     }
 
     // Update customer with full analysis
