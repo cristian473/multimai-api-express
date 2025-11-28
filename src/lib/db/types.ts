@@ -68,7 +68,9 @@ export type ConversationMessage = {
   role: "user" | "assistant" | "system";
   content: string;
   timestamp?: any;
-  chat_message_id?: string;
+  chatMessageId?: string;
+  chat_message_id?: string; // Legacy support
+  whatsappMessageId?: string; // Alias for chatMessageId
   isContext?: boolean; // Flag to mark context messages (tool executions, internal logs)
 };
 

@@ -384,7 +384,7 @@ export async function runRequestsAgent(
     tools: {
       process_owner_response: processResponseTool,
     },
-    stopWhen: stepCountIs(1), // Stop after 1 step (v5)
+    stopWhen: stepCountIs(2), // Stop after 1 step (v5)
   });
 
   console.log('[runRequestsAgent] ✓ Procesamiento completado');

@@ -1,69 +1,110 @@
-import {
-  getTodayConversationMessages,
-  getPreviousConversationSummaries,
-  getMultimaiMessages
-} from '../db/repositories/conversations';
+/**
+ * History Utilities
+ * 
+ * This module provides backward-compatible functions for loading conversation history.
+ * All functions now delegate to the centralized conversation-loader module.
+ */
 
-type ChatMessage = {
+import {
+  loadConversationForLLM,
+  getMessagesForLLM,
+  type LLMMessage,
+} from '../ai/context/conversation-loader';
+import { getMultimaiMessages } from '../db/repositories/conversations';
+import logger from 'jet-logger';
+
+// Re-export types for backward compatibility
+export type ChatMessage = {
   role: 'user' | 'assistant' | 'system';
   content: string;
-  chat_message_id?: string;
-}
+  chatMessageId?: string;
+};
 
+/**
+ * Get conversation history for agent context
+ * Uses centralized loadConversationForLLM under the hood
+ * 
+ * @deprecated Use loadConversationForLLM from '../../ai/context' for more control
+ */
 export async function getHistory(uid: string, userPhone: string): Promise<ChatMessage[]> {
-  let conversationHistory: ChatMessage[] = [];
+  try {
+    const result = await loadConversationForLLM(uid, userPhone, {
+      includeContextMessages: true,
+      includePreviousSummaries: true,
+      maxPreviousSummaries: 5,
+    });
 
-  // Load today's messages
-  const todayMessages = await getTodayConversationMessages(uid, userPhone);
-
-  if (todayMessages.length > 0) {
-    console.log(`Loaded ${todayMessages.length} messages from today`);
-    conversationHistory = todayMessages.map(msg => ({
+    return result.messages.map((msg) => ({
       role: msg.role,
-      content: msg.content
+      content: msg.content,
+      chatMessageId: msg.chatMessageId,
     }));
-  } else {
-    // Load previous conversation summaries
-    console.log('No messages from today, loading previous conversation summaries');
-    const previousSummaries = await getPreviousConversationSummaries(uid, userPhone, 5);
-
-    if (previousSummaries.length > 0) {
-      const summariesContext = previousSummaries
-        .filter(s => s.summary && s.summary.trim() !== '')
-        .map(s => `Resumen de conversación del ${s.date}: ${s.summary}`)
-        .join('\n');
-
-      if (summariesContext) {
-        conversationHistory.push({
-          role: 'system',
-          content: `Contexto de conversaciones anteriores:\n${summariesContext}`
-        });
-      }
-    }
+  } catch (error) {
+    logger.err(`[History] Error loading history: ${error}`);
+    return [];
   }
-
-  return conversationHistory;
 }
 
+/**
+ * Get history for Multimai agent (global agent, not per-user)
+ */
 export async function getMultimaiHistory(userPhone: string): Promise<ChatMessage[]> {
-  let conversationHistory: ChatMessage[] = [];
+  const conversationHistory: ChatMessage[] = [];
 
   try {
     const messages = await getMultimaiMessages(userPhone, 50);
 
     if (messages.length > 0) {
-      console.log(`Loaded ${messages.length} messages from multimai agent`);
-      conversationHistory = messages.map(msg => ({
-        role: msg.role,
-        content: msg.content,
-        chat_message_id: msg.chat_message_id
-      }));
+      logger.info(`[History] Loaded ${messages.length} messages from multimai agent`);
+      conversationHistory.push(
+        ...messages.map((msg) => ({
+          role: msg.role as 'user' | 'assistant' | 'system',
+          content: msg.content,
+          chatMessageId: msg.chatMessageId,
+        }))
+      );
     } else {
-      console.log('No messages found in multimai agent collection');
+      logger.info('[History] No messages found in multimai agent collection');
     }
   } catch (error) {
-    console.error('Error loading multimai history:', error);
+    logger.err(`[History] Error loading multimai history: ${error}`);
   }
 
   return conversationHistory;
 }
+
+/**
+ * Get only previous conversation summaries (for context injection)
+ * 
+ * @deprecated Use loadConversationForLLM with includePreviousSummaries option
+ */
+export async function getPreviousSummariesContext(uid: string, userPhone: string): Promise<string | null> {
+  try {
+    const result = await loadConversationForLLM(uid, userPhone, {
+      includeContextMessages: false,
+      includePreviousSummaries: true,
+      maxPreviousSummaries: 5,
+      maxMessages: 1, // Only get the summaries system message
+      filterRoles: ['system'],
+    });
+
+    const summaryMessage = result.messages.find(
+      (m) => m.role === 'system' && m.content.includes('Contexto de conversaciones anteriores')
+    );
+
+    if (summaryMessage) {
+      // Extract just the summaries part without the header
+      const content = summaryMessage.content;
+      const headerEnd = content.indexOf('\n');
+      return headerEnd > 0 ? content.substring(headerEnd + 1) : content;
+    }
+
+    return null;
+  } catch (error) {
+    logger.err(`[History] Error loading previous summaries: ${error}`);
+    return null;
+  }
+}
+
+// Re-export from conversation-loader for convenience
+export { loadConversationForLLM, getMessagesForLLM, type LLMMessage };

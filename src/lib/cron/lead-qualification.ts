@@ -1,46 +1,84 @@
+/**
+ * Lead Qualification Cron Job
+ * Fallback for orphan conversations not processed by the sliding window system
+ * 
+ * This runs periodically to catch:
+ * - Conversations from old schema (DDMMYYYY format)
+ * - Conversations that somehow missed the BullMQ job
+ * - Conversations where Redis/BullMQ was unavailable
+ */
+
 import logger from 'jet-logger';
 import { db, admin } from '../db/firebase';
 import { generateObject } from 'ai';
 import { getModel } from '../ai/openrouter';
 import { AI_CONFIG } from '../ai/config';
 import { z } from 'zod';
+import { CONVERSATION_TIMEOUT_HOURS, MIN_MESSAGES_FOR_SUMMARY } from '../../config/constants';
 
 const FieldValue = admin.firestore.FieldValue;
 
 // Constants
-const CONVERSATION_TIMEOUT_HOURS = 4;
 const BATCH_SIZE = 10;
 
-// Lead qualification schema based on BANT framework
-const leadQualificationSchema = z.object({
-  intencion_score: z.number().min(0).max(10).describe('Score de intención de compra/alquiler (0-10)'),
-  capacidad_economica: z.enum(['alta', 'media', 'baja', 'desconocida']).describe('Capacidad económica del lead'),
-  urgencia_score: z.number().min(0).max(10).describe('Score de urgencia/timeline (0-10)'),
-  engagement_score: z.number().min(0).max(10).describe('Score de engagement/interacción (0-10)'),
-  señales_positivas: z.array(z.string()).describe('Lista de señales positivas detectadas'),
-  señales_negativas: z.array(z.string()).describe('Lista de señales negativas detectadas'),
-  lead_stage: z.enum(['caliente', 'tibio', 'frío', 'muy_frío']).describe('Etapa del lead'),
-  bant_scores: z.object({
+// Legacy lead qualification schema for old conversations
+const legacyLeadQualificationSchema = z.object({
+  intentionScore: z.number().min(0).max(10).describe('Score de intención de compra/alquiler (0-10)'),
+  economicCapacity: z.enum(['alta', 'media', 'baja', 'desconocida']).describe('Capacidad económica del lead'),
+  urgencyScore: z.number().min(0).max(10).describe('Score de urgencia/timeline (0-10)'),
+  engagementScore: z.number().min(0).max(10).describe('Score de engagement/interacción (0-10)'),
+  positiveSignals: z.array(z.string()).describe('Lista de señales positivas detectadas'),
+  negativeSignals: z.array(z.string()).describe('Lista de señales negativas detectadas'),
+  leadStage: z.enum(['caliente', 'tibio', 'frío', 'muy_frío']).describe('Etapa del lead'),
+  bantScores: z.object({
     budget: z.number().min(0).max(25).describe('Score de presupuesto (0-25)'),
     authority: z.number().min(0).max(15).describe('Score de autoridad para decidir (0-15)'),
     need: z.number().min(0).max(20).describe('Score de necesidad definida (0-20)'),
     timeline: z.number().min(0).max(25).describe('Score de urgencia/timeline (0-25)'),
     engagement: z.number().min(0).max(15).describe('Score de engagement (0-15)'),
   }).describe('Scores detallados BANT'),
-  total_score: z.number().min(0).max(100).describe('Score total (0-100)'),
-  conversation_tags: z.array(z.string()).describe('Tags relevantes de la conversación'),
+  totalScore: z.number().min(0).max(100).describe('Score total (0-100)'),
+  conversationTags: z.array(z.string()).describe('Tags relevantes de la conversación'),
   summary: z.string().describe('Resumen breve de la conversación'),
   interests: z.array(z.object({
     name: z.string(),
     type: z.enum(['property_type', 'location', 'operation', 'budget', 'feature', 'custom']),
-    value: z.string().optional(),
+    value: z.string().nullable(),
   })).describe('Intereses identificados del lead'),
+  // New fields for enriched analysis
+  preferences: z.object({
+    operationType: z.array(z.string()),
+    propertyTypes: z.array(z.string()),
+    locations: z.array(z.string()),
+    priceRange: z.object({
+      min: z.number().nullable(),
+      max: z.number().nullable(),
+      currency: z.string()
+    }).nullable(),
+    features: z.array(z.string()),
+    bedrooms: z.number().nullable(),
+    bathrooms: z.number().nullable(),
+  }),
+  propertiesViewed: z.array(z.object({
+    propertyId: z.string(),
+    name: z.string(),
+    description: z.string(),
+    askedAbout: z.array(z.string())
+  })),
+  tags: z.object({
+    operation: z.array(z.string()),
+    propertyType: z.array(z.string()),
+    location: z.array(z.string()),
+    budget: z.array(z.string()),
+    timeline: z.array(z.string()),
+    custom: z.array(z.string())
+  }),
 });
 
-type LeadQualificationResult = z.infer<typeof leadQualificationSchema>;
+type LeadQualificationResult = z.infer<typeof legacyLeadQualificationSchema>;
 
 /**
- * Get the date key for today in DDMMYYYY format
+ * Get the date key for today in DDMMYYYY format (legacy)
  */
 function getTodayDateKey(): string {
   const now = new Date();
@@ -51,7 +89,7 @@ function getTodayDateKey(): string {
 }
 
 /**
- * Check if a conversation is inactive (no messages for CONVERSATION_TIMEOUT_HOURS)
+ * Check if a conversation is inactive
  */
 function isConversationInactive(lastMessageAt: Date): boolean {
   const now = new Date();
@@ -72,10 +110,19 @@ async function qualifyLead(
       return null;
     }
 
-    // Format messages for the prompt
-    const formattedMessages = messages
+    // Separate context messages from conversation messages
+    const contextMessages = messages.filter((m) => m.content.includes('tool executed:'));
+    const conversationMessages = messages.filter(
+      (m) => !m.content.includes('tool executed:') && m.role !== 'system'
+    );
+
+    const formattedMessages = conversationMessages
       .map((m) => `${m.role === 'user' ? customerName : 'Asistente'}: ${m.content}`)
       .join('\n');
+
+    const contextText = contextMessages.length > 0
+      ? `\n\n<contexto_herramientas>\n${contextMessages.map(m => m.content).join('\n')}\n</contexto_herramientas>`
+      : '';
 
     const prompt = `<task>
 Eres un experto en calificación de leads inmobiliarios usando el framework BANT adaptado al sector.
@@ -84,6 +131,7 @@ Analiza la siguiente conversación y genera una calificación detallada.
 <conversacion>
 ${formattedMessages}
 </conversacion>
+${contextText}
 
 <framework_bant>
 **Budget (Presupuesto)** - 25 puntos máximo
@@ -121,33 +169,15 @@ ${formattedMessages}
 - 0-49 puntos: Lead Muy Frío (muy_frío)
 </clasificacion>
 
-<señales_positivas_ejemplo>
-- "Necesito mudarme para [fecha]"
-- "Mi presupuesto es de [monto específico]"
-- "Estoy vendiendo mi propiedad actual"
-- "¿Cuándo puedo ver la propiedad?"
-- "¿Qué documentación necesito para reservar?"
-- "Tengo pre-aprobado un crédito de..."
-- "Busco departamento de 2 dormitorios en [zona]"
-- "Trabajo en [zona] y necesito algo cerca"
-</señales_positivas_ejemplo>
-
-<señales_negativas_ejemplo>
-- "Solo estoy mirando"
-- "Es para dentro de mucho tiempo"
-- "Todavía no sé si voy a comprar o alquilar"
-- Respuestas monosilábicas
-- No responde a preguntas sobre presupuesto o timing
-</señales_negativas_ejemplo>
-
 <instrucciones>
 1. Analiza cada mensaje del usuario buscando señales BANT
 2. Asigna scores según el framework
 3. Identifica señales positivas y negativas específicas (citas textuales cortas)
 4. Extrae intereses del usuario (tipo de propiedad, ubicación, operación, presupuesto, características)
-5. Genera tags relevantes para categorizar la conversación
-6. Escribe un resumen breve de la conversación
-7. Calcula el score total y determina el lead_stage
+5. Si hay mensajes de contexto (herramientas), extrae información de propiedades consultadas
+6. Genera tags relevantes para categorizar la conversación
+7. Escribe un resumen breve de la conversación
+8. Calcula el score total y determina el leadStage
 
 IMPORTANTE: Sé objetivo y basa tu análisis SOLO en lo que el usuario ha dicho. No asumas información que no está en la conversación.
 </instrucciones>
@@ -156,7 +186,7 @@ IMPORTANTE: Sé objetivo y basa tu análisis SOLO en lo que el usuario ha dicho.
     const model = getModel(AI_CONFIG?.LEAD_QUALIFICATION_MODEL ?? 'openai/gpt-4o-mini');
     const { object: result } = await generateObject({
       model: model as any,
-      schema: leadQualificationSchema,
+      schema: legacyLeadQualificationSchema,
       prompt,
       temperature: 0.3,
     });
@@ -169,16 +199,16 @@ IMPORTANTE: Sé objetivo y basa tu análisis SOLO en lo que el usuario ha dicho.
 }
 
 /**
- * Process a single conversation for qualification
+ * Process a single conversation for qualification (legacy + new schema support)
  */
 async function processConversation(
   uid: string,
   phone: string,
-  dateKey: string,
+  conversationId: string,
   customerName: string
 ): Promise<boolean> {
   try {
-    const conversationRef = db.doc(`users/${uid}/customers/${phone}/conversations/${dateKey}`);
+    const conversationRef = db.doc(`users/${uid}/customers/${phone}/conversations/${conversationId}`);
     const conversationSnapshot = await conversationRef.get();
 
     if (!conversationSnapshot.exists) {
@@ -187,27 +217,37 @@ async function processConversation(
 
     const conversationData = conversationSnapshot.data();
 
-    // Skip if already qualified
+    // Skip if already qualified/closed (new schema)
+    if (conversationData?.isOpen === false && conversationData?.summary) {
+      logger.info(`[LeadQualification] Conversation ${phone}/${conversationId} already processed`);
+      return false;
+    }
+
+    // Skip if already qualified (legacy schema)
     if (conversationData?.is_closed && conversationData?.qualification) {
-      logger.info(`[LeadQualification] Conversation ${phone}/${dateKey} already qualified, skipping`);
+      logger.info(`[LeadQualification] Conversation ${phone}/${conversationId} already qualified`);
       return false;
     }
 
-    // Get last message timestamp
-    const lastMessageAt = conversationData?.last_message_at?.toDate?.() || conversationData?.last_message_at;
+    // Get last message timestamp (handle both schemas)
+    const lastMessageAt = conversationData?.lastMessageAt?.toDate?.() 
+      || conversationData?.last_message_at?.toDate?.() 
+      || conversationData?.lastMessageAt 
+      || conversationData?.last_message_at;
+
     if (!lastMessageAt || !isConversationInactive(new Date(lastMessageAt))) {
-      logger.info(`[LeadQualification] Conversation ${phone}/${dateKey} is still active`);
+      logger.info(`[LeadQualification] Conversation ${phone}/${conversationId} is still active`);
       return false;
     }
 
-    // Get all messages
+    // Get all messages from this conversation
     const messagesSnapshot = await db
-      .collection(`users/${uid}/customers/${phone}/conversations/${dateKey}/messages`)
+      .collection(`users/${uid}/customers/${phone}/conversations/${conversationId}/messages`)
       .orderBy('timestamp', 'asc')
       .get();
 
     if (messagesSnapshot.empty) {
-      logger.info(`[LeadQualification] No messages found for ${phone}/${dateKey}`);
+      logger.info(`[LeadQualification] No messages found for ${phone}/${conversationId}`);
       return false;
     }
 
@@ -218,63 +258,58 @@ async function processConversation(
           role: data.role,
           content: data.content,
           timestamp: data.timestamp?.toDate?.() || data.timestamp,
+          isContext: data.isContext || false,
         };
       })
-      .filter((m) => !m.content.includes('tool executed:') && m.role !== 'system');
+      .filter((m) => m.role !== 'system');
 
     // Skip if not enough user messages
-    const userMessages = messages.filter((m) => m.role === 'user');
+    const userMessages = messages.filter((m) => m.role === 'user' && !m.isContext);
     if (userMessages.length < 2) {
-      logger.info(`[LeadQualification] Not enough user messages for ${phone}/${dateKey}`);
+      logger.info(`[LeadQualification] Not enough user messages for ${phone}/${conversationId}`);
       // Mark as closed but without qualification
       await conversationRef.update({
+        isOpen: false,
         is_closed: true,
+        closedAt: FieldValue.serverTimestamp(),
         closed_at: FieldValue.serverTimestamp(),
       });
       return true;
     }
 
     // Qualify the lead
-    logger.info(`[LeadQualification] Qualifying conversation ${phone}/${dateKey} with ${messages.length} messages`);
+    logger.info(`[LeadQualification] Qualifying conversation ${phone}/${conversationId} with ${messages.length} messages`);
     const qualification = await qualifyLead(messages, customerName || phone);
 
     if (!qualification) {
-      logger.err(`[LeadQualification] Failed to qualify ${phone}/${dateKey}`);
+      logger.err(`[LeadQualification] Failed to qualify ${phone}/${conversationId}`);
       return false;
     }
 
     // Update conversation with qualification
     await conversationRef.update({
+      // New schema
+      isOpen: false,
+      closedAt: FieldValue.serverTimestamp(),
+      summary: qualification.summary,
+      // Legacy schema compatibility
       is_closed: true,
       closed_at: FieldValue.serverTimestamp(),
-      qualification: {
-        intencion_score: qualification.intencion_score,
-        capacidad_economica: qualification.capacidad_economica,
-        urgencia_score: qualification.urgencia_score,
-        engagement_score: qualification.engagement_score,
-        señales_positivas: qualification.señales_positivas,
-        señales_negativas: qualification.señales_negativas,
-        lead_stage: qualification.lead_stage,
-        bant_scores: qualification.bant_scores,
-        total_score: qualification.total_score,
-        analyzed_at: FieldValue.serverTimestamp(),
-      },
-      tags: qualification.conversation_tags,
-      summary: qualification.summary,
+      tags: qualification.conversationTags,
     });
 
-    // Update customer with interests and latest qualification
+    // Update customer with qualification data
     const customerRef = db.doc(`users/${uid}/customers/${phone}`);
     const customerSnapshot = await customerRef.get();
 
     if (customerSnapshot.exists) {
       const existingInterests = customerSnapshot.data()?.interests || [];
-      
+
       // Merge new interests with existing (avoid duplicates)
       const newInterests = qualification.interests.filter(
         (newInt) => !existingInterests.some((existing: any) => existing.name === newInt.name)
       );
-      
+
       const mergedInterests = [
         ...existingInterests,
         ...newInterests.map((i) => ({
@@ -282,27 +317,61 @@ async function processConversation(
           name: i.name,
           type: i.type,
           value: i.value,
-          created_at: FieldValue.serverTimestamp(),
+          createdAt: FieldValue.serverTimestamp(),
         })),
       ];
 
-      await customerRef.update({
+      // Prepare update data
+      const updateData: any = {
         interests: mergedInterests,
-        latest_qualification: {
-          lead_stage: qualification.lead_stage,
-          total_score: qualification.total_score,
-          analyzed_at: FieldValue.serverTimestamp(),
+        qualification: {
+          intentionScore: qualification.intentionScore,
+          economicCapacity: qualification.economicCapacity,
+          urgencyScore: qualification.urgencyScore,
+          engagementScore: qualification.engagementScore,
+          positiveSignals: qualification.positiveSignals,
+          negativeSignals: qualification.negativeSignals,
+          leadStage: qualification.leadStage,
+          bantScores: qualification.bantScores,
+          totalScore: qualification.totalScore,
+          analyzedAt: FieldValue.serverTimestamp(),
         },
-        updated_at: FieldValue.serverTimestamp(),
-      });
+        latestQualification: {
+          leadStage: qualification.leadStage,
+          totalScore: qualification.totalScore,
+          analyzedAt: FieldValue.serverTimestamp(),
+        },
+        updatedAt: FieldValue.serverTimestamp(),
+        activeConversationId: null, // Clear active conversation
+      };
+
+      // Add optional enriched fields if present
+      if (qualification.preferences) {
+        updateData.preferences = qualification.preferences;
+      }
+      if (qualification.propertiesViewed && qualification.propertiesViewed.length > 0) {
+        const existingProps = customerSnapshot.data()?.propertiesViewed || [];
+        const newProps = qualification.propertiesViewed.filter(
+          (p) => !existingProps.some((ep: any) => ep.propertyId === p.propertyId)
+        );
+        updateData.propertiesViewed = [
+          ...existingProps,
+          ...newProps.map((p) => ({ ...p, viewedAt: FieldValue.serverTimestamp() }))
+        ];
+      }
+      if (qualification.tags) {
+        updateData.tags = qualification.tags;
+      }
+
+      await customerRef.update(updateData);
     }
 
     logger.info(
-      `[LeadQualification] Successfully qualified ${phone}/${dateKey}: ${qualification.lead_stage} (${qualification.total_score}/100)`
+      `[LeadQualification] Successfully qualified ${phone}/${conversationId}: ${qualification.leadStage} (${qualification.totalScore}/100)`
     );
     return true;
   } catch (error) {
-    logger.err(`[LeadQualification] Error processing conversation ${phone}/${dateKey}:`, error);
+    logger.err(`[LeadQualification] Error processing conversation ${phone}/${conversationId}:`, error);
     return false;
   }
 }
@@ -325,13 +394,17 @@ async function getActiveUsers(): Promise<Array<{ uid: string }>> {
 }
 
 /**
- * Get conversations that need qualification for a user
+ * Get orphan conversations that need qualification
+ * These are conversations that:
+ * 1. Are marked as open (isOpen: true) but inactive
+ * 2. Legacy conversations (with date format) that are not closed
+ * 3. Conversations without is_closed or isOpen field
  */
-async function getConversationsToQualify(
+async function getOrphanConversations(
   uid: string
-): Promise<Array<{ phone: string; dateKey: string; customerName: string }>> {
+): Promise<Array<{ phone: string; conversationId: string; customerName: string }>> {
   try {
-    const conversationsToQualify: Array<{ phone: string; dateKey: string; customerName: string }> = [];
+    const conversationsToQualify: Array<{ phone: string; conversationId: string; customerName: string }> = [];
     const today = getTodayDateKey();
 
     // Get all customers
@@ -342,56 +415,40 @@ async function getConversationsToQualify(
       const customerData = customerDoc.data();
       const customerName = customerData.name || phone;
 
-      // Get conversations for this customer that are not closed
+      // Get all conversations for this customer
       const conversationsSnapshot = await db
         .collection(`users/${uid}/customers/${phone}/conversations`)
-        .where('is_closed', '==', false)
         .get();
 
-      // Also check conversations without the is_closed field (older ones)
-      const uncheckedConversationsSnapshot = await db
-        .collection(`users/${uid}/customers/${phone}/conversations`)
-        .get();
-
-      const processedDates = new Set<string>();
-
-      // Process explicitly open conversations
       for (const convDoc of conversationsSnapshot.docs) {
-        const dateKey = convDoc.id;
-        if (!processedDates.has(dateKey)) {
-          processedDates.add(dateKey);
-          conversationsToQualify.push({ phone, dateKey, customerName });
-        }
-      }
-
-      // Process conversations that might not have is_closed field
-      for (const convDoc of uncheckedConversationsSnapshot.docs) {
-        const dateKey = convDoc.id;
+        const conversationId = convDoc.id;
         const convData = convDoc.data();
 
-        // Skip if already processed or already closed
-        if (processedDates.has(dateKey) || convData.is_closed) {
-          continue;
-        }
+        // Skip if already closed/processed
+        if (convData.isOpen === false && convData.summary) continue;
+        if (convData.is_closed && convData.qualification) continue;
 
         // Check if has last_message_at and is inactive
-        const lastMessageAt = convData.last_message_at?.toDate?.() || convData.last_message_at;
+        const lastMessageAt = convData.lastMessageAt?.toDate?.() 
+          || convData.last_message_at?.toDate?.() 
+          || convData.lastMessageAt 
+          || convData.last_message_at;
+
         if (lastMessageAt && isConversationInactive(new Date(lastMessageAt))) {
-          processedDates.add(dateKey);
-          conversationsToQualify.push({ phone, dateKey, customerName });
+          conversationsToQualify.push({ phone, conversationId, customerName });
         }
       }
     }
 
     return conversationsToQualify;
   } catch (error) {
-    logger.err(`[LeadQualification] Error getting conversations for user ${uid}:`, error);
+    logger.err(`[LeadQualification] Error getting orphan conversations for user ${uid}:`, error);
     return [];
   }
 }
 
 /**
- * Main function to process lead qualification
+ * Main function to process lead qualification (fallback cron job)
  */
 export async function processLeadQualification(): Promise<{
   processed: number;
@@ -401,27 +458,27 @@ export async function processLeadQualification(): Promise<{
   const stats = { processed: 0, succeeded: 0, failed: 0 };
 
   try {
-    logger.info('[LeadQualification] Starting lead qualification process...');
+    logger.info('[LeadQualification] Starting fallback lead qualification process...');
 
     // Get all active users
     const users = await getActiveUsers();
     logger.info(`[LeadQualification] Found ${users.length} active users`);
 
     for (const { uid } of users) {
-      // Get conversations to qualify for this user
-      const conversationsToQualify = await getConversationsToQualify(uid);
+      // Get orphan conversations to qualify for this user
+      const orphanConversations = await getOrphanConversations(uid);
       logger.info(
-        `[LeadQualification] Found ${conversationsToQualify.length} conversations to qualify for user ${uid}`
+        `[LeadQualification] Found ${orphanConversations.length} orphan conversations for user ${uid}`
       );
 
       // Process in batches
-      for (let i = 0; i < conversationsToQualify.length; i += BATCH_SIZE) {
-        const batch = conversationsToQualify.slice(i, i + BATCH_SIZE);
+      for (let i = 0; i < orphanConversations.length; i += BATCH_SIZE) {
+        const batch = orphanConversations.slice(i, i + BATCH_SIZE);
 
         await Promise.all(
-          batch.map(async ({ phone, dateKey, customerName }) => {
+          batch.map(async ({ phone, conversationId, customerName }) => {
             stats.processed++;
-            const success = await processConversation(uid, phone, dateKey, customerName);
+            const success = await processConversation(uid, phone, conversationId, customerName);
             if (success) {
               stats.succeeded++;
             } else {
@@ -431,7 +488,7 @@ export async function processLeadQualification(): Promise<{
         );
 
         // Small delay between batches to avoid rate limiting
-        if (i + BATCH_SIZE < conversationsToQualify.length) {
+        if (i + BATCH_SIZE < orphanConversations.length) {
           await new Promise((resolve) => setTimeout(resolve, 1000));
         }
       }
@@ -446,4 +503,3 @@ export async function processLeadQualification(): Promise<{
     return stats;
   }
 }
-

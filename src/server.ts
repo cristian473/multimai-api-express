@@ -18,7 +18,7 @@ import EnvVars from './constants/EnvVars';
 import { NodeEnvs } from './constants/misc';
 import { RouteError } from './other/errorHandler';
 import apiRouter from './router';
-// import { serverAdapter as queueDashboard } from './queues/dashboard';
+import { serverAdapter as queueDashboard } from './queues/dashboard';
 
 // **** Variables **** //
 
@@ -27,7 +27,16 @@ const app = express();
 // **** Setup **** //
 
 // Basic middleware - increased limits for AI responses with images
-app.use(express.json({ limit: '10mb' }));
+// Save raw body for Paddle webhook signature verification
+app.use(express.json({ 
+  limit: '10mb',
+  verify: (req: any, res, buf) => {
+    // Save raw body for webhook signature verification
+    if (req.originalUrl.includes('/paddle/webhook')) {
+      req.rawBody = buf.toString();
+    }
+  }
+}));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use(cookieParser(EnvVars.CookieProps.Secret));
 app.use(bodyParser.urlencoded({ extended: false, limit: '10mb' }));
@@ -48,8 +57,8 @@ app.get('/', (req, res) => {
   res.send('Hello World')
 })
 
-// Bull Board Dashboard - Monitoreo de queues
-// app.use('/admin/queues', queueDashboard.getRouter());
+// Bull Board Dashboard - Queue monitoring
+app.use('/admin/queues', queueDashboard.getRouter());
 
 app.use('/api', apiRouter);
 

@@ -1,6 +1,12 @@
 export const REPORTAR_AL_NUMERO = 'REPORTAR_AL_NUMERO'
 export const USER_ID = 'USER_ID'
 
+// Conversation Sliding Window Configuration
+export const CONVERSATION_TIMEOUT_MS = 60 * 60 * 1000; // 60 minutes
+export const CONVERSATION_TIMEOUT_HOURS = 1; // For fallback cron
+export const MIN_MESSAGES_FOR_SUMMARY = 10;
+export const CONVERSATION_QUEUE_NAME = 'conversation-close';
+
 
 export const customersCollection = (uid:string) => `users/${uid}/customers`
 export const userDocument = (uid:string) => `users/${uid}`

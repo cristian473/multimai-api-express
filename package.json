@@ -24,6 +24,7 @@
     "@langchain/langgraph": "^0.2.45",
     "@langchain/openai": "^0.6.16",
     "@openrouter/ai-sdk-provider": "^1.2.1",
+    "@paddle/paddle-node-sdk": "^3.4.0",
     "@types/cookie-parser": "^1.4.7",
     "@types/node-cron": "^3.0.11",
     "@types/redis": "^4.0.11",

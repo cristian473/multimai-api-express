@@ -1,5 +1,5 @@
-import { db } from "@/lib/db/firebase";
-import type { Tenant, PaymentReminder, PaymentReceipt } from "@/lib/types/tenant";
+import { db } from "../../db/firebase";
+import type { Tenant, PaymentReminder, PaymentReceipt } from "../../types/tenant";
 
 /**
  * Obtiene un tenant por su número de teléfono

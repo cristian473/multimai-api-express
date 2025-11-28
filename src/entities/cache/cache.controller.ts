@@ -2,7 +2,7 @@
 import { Request, Response } from 'express';
 import HttpStatusCodes from '../../constants/HttpStatusCodes';
 import cacheService from './cache.service';
-import { RouteError } from '@/other/errorHandler';
+import { RouteError } from '../../other/errorHandler';
 import { RevalidateCacheRequest } from './cache.dto';
 
 export async function revalidateCache(req: Request, res: Response) {

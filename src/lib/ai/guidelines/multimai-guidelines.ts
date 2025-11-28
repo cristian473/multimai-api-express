@@ -88,54 +88,221 @@ export const multimaiGuidelines: Guideline[] = [
     ]
   },
   
-  {
-    id: 'check_visit_availability',
-    condition: 'El usuario quiere saber cuándo puede visitar una propiedad',
-    action: 'Primero usa get_availability para verificar visitas programadas existentes. Si no hay ninguna, preguntar por el día y hora de disponibilidad del usuario',
-    priority: 8,
-    difficulty: 'high',
-    tools: ['get_availability', 'ask_availability'],
-    enabled: true,
-    scope: 'global',
-    tags: ['visit', 'availability']
-  },
+  // ========== VISITAS: Guidelines específicas ordenadas por flujo ==========
   
   {
-    id: 'schedule_new_visit',
-    condition: 'El usuario dice explícitamente que quiere "agendar", "programar", "reservar" una visita O menciona "visitar" con fecha/hora específica',
-    action: 'ANTES de ejecutar cualquier herramienta, VERIFICAR: 1) ¿Tengo el property_id de la propiedad? Si NO: pregunta "¿Cuál de las propiedades te gustaría visitar?" o usa search_properties. 2) ¿Tengo fecha Y hora específica del cliente? Si NO: pregunta "¿Qué día y a qué hora te gustaría visitarla?". 3) SOLO cuando tengas property_id + fecha + hora: usa get_availability para ver slots existentes, luego usa create_visit (nueva visita) o add_visitor (agregar a visita existente). NO ejecutar sin datos completos',
-    priority: 10,
-    difficulty: 'high',
-    tools: ['search_properties', 'get_availability', 'create_visit', 'add_visitor'],
+    id: 'query_visit_availability_only',
+    condition: 'El usuario pregunta "¿cuándo puedo visitar?", "¿qué horarios tienen?", "¿hay disponibilidad?", "¿cuándo se puede ver?" SIN mencionar una fecha/hora específica y SIN usar verbos como "agendar", "reservar", "programar"',
+    action: 'SOLO usa get_availability para mostrar los horarios disponibles. NO ejecutes create_visit ni add_visitor. Presenta los slots como opciones: "Tenemos visitas programadas para: [fechas/horarios]. ¿Te gustaría anotarte en alguna de estas?". Si no hay slots, pregunta: "¿Qué día y horario te vendría bien? Consulto al dueño la disponibilidad"',
+    priority: 9,
+    difficulty: 'medium',
+    tools: ['get_availability'],
     enabled: true,
     scope: 'global',
-    tags: ['visit', 'scheduling'],
+    tags: ['visit', 'availability', 'query'],
     validationCriteria: [
       {
-        name: 'Confirmación de datos completos',
-        description: 'Verificar que la respuesta confirme tener: 1) property_id específico, 2) fecha exacta, 3) hora exacta. Si falta alguno, debe preguntar explícitamente por el dato faltante',
-        weight: 25,
+        name: 'Solo consulta, no agenda',
+        description: 'Esta guideline SOLO debe mostrar disponibilidad. NO debe ejecutar create_visit ni add_visitor',
+        weight: 40,
         examples: [
-          'CORRECTO: "¿Cuál de las propiedades te gustaría visitar?" (cuando falta property_id)',
-          'INCORRECTO: Intentar agendar sin tener todos los datos necesarios'
+          'CORRECTO: "Hay visitas programadas para el sábado 15 a las 10:00 y 14:00. ¿Te anoto en alguna?"',
+          'INCORRECTO: Crear una visita automáticamente sin que el usuario lo pidiera'
         ]
-      },
+      }
+    ]
+  },
+
+  {
+    id: 'collect_visit_details_missing_property',
+    condition: 'El usuario quiere "agendar", "programar", "reservar" una visita PERO NO se identifica claramente qué propiedad quiere visitar (no hay @@property_id@@ en contexto reciente o no especificó cuál)',
+    action: 'NO ejecutar ninguna herramienta de visita. Preguntar: "¿Cuál de las propiedades te gustaría visitar?" Si no se mostraron propiedades antes, usar search_properties primero para que el usuario elija',
+    priority: 11,
+    difficulty: 'medium',
+    tools: ['search_properties'],
+    enabled: true,
+    scope: 'global',
+    tags: ['visit', 'scheduling', 'validation'],
+    validationCriteria: [
       {
-        name: 'Confirmación con dueño antes de crear nueva visita',
-        description: 'Si NO existe una visita programada en el horario solicitado (get_availability no devuelve slots), DEBE usar ask_availability para consultar al dueño ANTES de ejecutar create_visit. NO se debe confirmar directamente al cliente sin consultar primero al propietario',
+        name: 'Solicitar propiedad antes de continuar',
+        description: 'NO se debe intentar agendar sin saber qué propiedad visitar',
         weight: 30,
         examples: [
-          'CORRECTO: "Te consulto al dueño sobre la disponibilidad para el 15/05 a las 14:00 y te confirmo enseguida ✓" (cuando no hay slot existente)',
-          'INCORRECTO: Ejecutar create_visit directamente sin consultar al dueño cuando no hay visitas programadas en ese horario'
+          'CORRECTO: "¿Cuál de las propiedades te gustaría visitar?"',
+          'INCORRECTO: Ejecutar create_visit sin property_id'
+        ]
+      }
+    ]
+  },
+
+  {
+    id: 'collect_visit_details_missing_datetime',
+    condition: 'El usuario quiere "agendar", "programar", "reservar" una visita Y se identifica la propiedad (@@property_id@@ en contexto) PERO NO especificó fecha Y hora concretas',
+    action: 'NO ejecutar create_visit todavía. Usar get_availability para mostrar slots existentes. Preguntar: "¿Qué día y horario te vendría bien?" o "Tenemos estas visitas programadas: [slots]. ¿Te anoto en alguna o preferís otro horario?"',
+    priority: 10,
+    difficulty: 'medium',
+    tools: ['get_availability'],
+    enabled: true,
+    scope: 'global',
+    tags: ['visit', 'scheduling', 'validation'],
+    validationCriteria: [
+      {
+        name: 'Solicitar fecha/hora antes de crear',
+        description: 'NO se debe crear visita sin fecha Y hora específicas del cliente',
+        weight: 30,
+        examples: [
+          'CORRECTO: "¿Qué día y horario te vendría bien para visitarla?"',
+          'INCORRECTO: Ejecutar create_visit sin fecha/hora'
+        ]
+      }
+    ]
+  },
+
+  {
+    id: 'schedule_visit_join_existing_slot',
+    condition: 'El usuario quiere agendar visita Y tengo property_id Y tengo fecha/hora específica Y get_availability devolvió un slot existente que coincide con esa fecha/hora',
+    action: 'Usar add_visitor para agregar al cliente al slot de visita existente. Confirmar: "Te anoté en la visita del [fecha] a las [hora] en [dirección]. ¡Te esperamos!"',
+    priority: 10,
+    difficulty: 'high',
+    tools: ['add_visitor'],
+    enabled: true,
+    scope: 'global',
+    tags: ['visit', 'scheduling', 'existing_slot'],
+    validationCriteria: [
+      {
+        name: 'Usar slot existente',
+        description: 'Si hay un slot que coincide, usar add_visitor en vez de create_visit',
+        weight: 25,
+        examples: [
+          'CORRECTO: Usar add_visitor para sumar al cliente a visita existente',
+          'INCORRECTO: Crear visita duplicada con create_visit'
         ]
       },
       {
-        name: 'Confirmación de agendamiento',
-        description: 'Si se ejecutó create_visit o add_visitor exitosamente, la respuesta debe confirmar claramente: fecha, hora, dirección de la propiedad, y próximos pasos',
+        name: 'Confirmación completa',
+        description: 'Confirmar fecha, hora y dirección al cliente',
         weight: 20,
         examples: [
-          'CORRECTO: "Perfecto, agendé tu visita para el 15/05 a las 14:00 en Av. Santa Fe 1234. Te llegará una confirmación por WhatsApp."',
-          'INCORRECTO: Responder solo "Listo" sin detalles de la visita'
+          'CORRECTO: "Te anoté para el sábado 15 a las 14:00 en Av. Santa Fe 1234"',
+          'INCORRECTO: Solo decir "Listo"'
+        ]
+      }
+    ]
+  },
+
+  {
+    id: 'schedule_visit_request_new_slot',
+    condition: 'El usuario quiere agendar visita Y tengo property_id Y tengo fecha/hora específica Y get_availability NO devolvió slots existentes para esa fecha/hora (o devolvió vacío)',
+    action: 'NO ejecutar create_visit directamente. PRIMERO usar ask_availability para consultar al dueño si está disponible en esa fecha/hora. Responder: "Te consulto con el dueño la disponibilidad para el [fecha] a las [hora] y te confirmo enseguida ✓". Esperar respuesta del dueño antes de crear la visita',
+    priority: 10,
+    difficulty: 'high',
+    tools: ['ask_availability'],
+    enabled: true,
+    scope: 'global',
+    tags: ['visit', 'scheduling', 'new_slot', 'owner_confirmation'],
+    validationCriteria: [
+      {
+        name: 'Consultar al dueño primero',
+        description: 'SIEMPRE consultar al dueño antes de crear una visita nueva. NO crear visita sin confirmación del propietario',
+        weight: 40,
+        examples: [
+          'CORRECTO: "Te consulto con el dueño la disponibilidad para el martes a las 15:00 y te confirmo ✓"',
+          'INCORRECTO: Ejecutar create_visit sin consultar al dueño'
+        ]
+      },
+      {
+        name: 'No prometer sin confirmación',
+        description: 'NO decir "agendé tu visita" hasta que el dueño confirme',
+        weight: 25,
+        examples: [
+          'CORRECTO: "Te aviso apenas el dueño me confirme"',
+          'INCORRECTO: "Perfecto, agendé tu visita" (sin confirmación del dueño)'
+        ]
+      }
+    ]
+  },
+
+  {
+    id: 'notify_user_owner_confirmed_availability',
+    condition: 'El dueño/propietario ACABA DE confirmar disponibilidad para una visita (respuesta afirmativa a ask_availability) Y el USUARIO todavía NO confirmó que quiere esa fecha/hora',
+    action: 'NO ejecutar create_visit todavía. Informar al usuario que el dueño confirmó disponibilidad y PEDIR CONFIRMACIÓN: "¡Buenas noticias! El dueño confirmó disponibilidad para el [fecha] a las [hora]. ¿Te anoto para esa visita?" Esperar respuesta afirmativa del usuario antes de crear',
+    priority: 11,
+    difficulty: 'medium',
+    enabled: true,
+    scope: 'global',
+    tags: ['visit', 'scheduling', 'user_confirmation'],
+    validationCriteria: [
+      {
+        name: 'Pedir confirmación al usuario',
+        description: 'SIEMPRE pedir confirmación explícita del usuario antes de crear la visita',
+        weight: 40,
+        examples: [
+          'CORRECTO: "El dueño confirmó para el martes a las 15:00. ¿Te anoto?"',
+          'INCORRECTO: Crear la visita automáticamente sin preguntar al usuario'
+        ]
+      },
+      {
+        name: 'No crear sin respuesta del usuario',
+        description: 'Esperar a que el usuario diga "sí", "dale", "perfecto", etc.',
+        weight: 30,
+        examples: [
+          'CORRECTO: Esperar respuesta afirmativa del usuario',
+          'INCORRECTO: Asumir que el usuario quiere la visita y crearla'
+        ]
+      }
+    ]
+  },
+
+  {
+    id: 'create_visit_after_both_confirmations',
+    condition: 'El dueño confirmó disponibilidad Y el usuario ACABA DE confirmar que quiere la visita (dijo "sí", "dale", "perfecto", "ok", "confirmo", etc.) Y tengo property_id Y fecha/hora',
+    action: 'Ahora sí ejecutar create_visit con los datos confirmados. Confirmar al cliente: "¡Listo! Agendé tu visita para el [fecha] a las [hora] en [dirección]. Te llegará una confirmación por WhatsApp"',
+    priority: 12,
+    difficulty: 'high',
+    tools: ['create_visit'],
+    enabled: true,
+    scope: 'global',
+    tags: ['visit', 'scheduling', 'confirmed', 'final'],
+    validationCriteria: [
+      {
+        name: 'Solo crear con ambas confirmaciones',
+        description: 'create_visit solo se ejecuta DESPUÉS de que el dueño Y el usuario confirmaron',
+        weight: 40,
+        examples: [
+          'CORRECTO: Dueño confirmó + Usuario dijo "sí" → create_visit',
+          'INCORRECTO: Crear visita solo con confirmación del dueño'
+        ]
+      },
+      {
+        name: 'Confirmación completa al usuario',
+        description: 'Informar fecha, hora y dirección de la visita creada',
+        weight: 25,
+        examples: [
+          'CORRECTO: "Agendé tu visita para el sábado 15 a las 14:00 en Av. Santa Fe 1234"',
+          'INCORRECTO: Solo decir "Listo" sin detalles'
+        ]
+      }
+    ]
+  },
+
+  {
+    id: 'user_declines_after_owner_confirmation',
+    condition: 'El dueño confirmó disponibilidad PERO el usuario rechazó o quiere otro horario (dijo "no", "mejor otro día", "no me sirve", "prefiero otro horario")',
+    action: 'NO crear visita. Preguntar qué otro día/horario prefiere: "Entendido, no hay problema. ¿Qué otro día y horario te vendría mejor?" y volver al flujo de consultar disponibilidad',
+    priority: 11,
+    difficulty: 'medium',
+    enabled: true,
+    scope: 'global',
+    tags: ['visit', 'scheduling', 'decline', 'reschedule'],
+    validationCriteria: [
+      {
+        name: 'Respetar decisión del usuario',
+        description: 'Si el usuario no quiere ese horario, NO crear la visita',
+        weight: 35,
+        examples: [
+          'CORRECTO: "¿Qué otro día te vendría mejor?"',
+          'INCORRECTO: Crear la visita de todas formas'
         ]
       }
     ]
@@ -304,16 +471,7 @@ export const multimaiGuidelines: Guideline[] = [
     tags: ['search', 'fallback', 'ux']
   },
 
-  {
-    id: 'visit_intent_without_details',
-    condition: 'El usuario expresa interés en visitar pero NO especifica cuál propiedad ni cuándo (ej: "me interesa visitar", "quiero ver propiedades")',
-    action: 'NO ejecutar create_visit todavía. Preguntar primero: "¿Cuál de las propiedades te gustaría visitar?" Si no se mostraron propiedades, preguntar qué tipo de propiedad busca. Esperar respuesta del usuario antes de agendar',
-    priority: 9,
-    difficulty: 'medium',
-    enabled: true,
-    scope: 'global',
-    tags: ['visit', 'confirmation', 'validation']
-  },
+  // visit_intent_without_details moved to: collect_visit_details_missing_property and collect_visit_details_missing_datetime
 
   {
     id: 'price_negotiation_escalation',

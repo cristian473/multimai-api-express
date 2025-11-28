@@ -3,19 +3,24 @@ import './pre-start'; // Must be the first import
 import logger from 'jet-logger';
 import server from './server';
 import { initializeCronJobs } from './lib/cron/scheduler';
-// import { startMessageWorker } from './queues/messageWorker';
+import {
+  startConversationWorker,
+  stopConversationWorker,
+  closeConversationQueue,
+  closeQueueConnection,
+} from './lib/queues';
 
 // **** Run **** //
 
-const SERVER_START_MSG = ('Express server started on port: ' + process.env.PORT);
+const SERVER_START_MSG = 'Express server started on port: ' + process.env.PORT;
 
 const startServer = async () => {
   try {
-    // Iniciar el worker de la queue de mensajes
-    // startMessageWorker();
-    logger.info('Message worker initialized');
+    // Start conversation close worker (sliding window)
+    startConversationWorker();
+    logger.info('Conversation worker initialized');
 
-    // Inicializar cron jobs
+    // Initialize cron jobs
     initializeCronJobs();
     logger.info('Cron jobs initialized');
 
@@ -25,6 +30,24 @@ const startServer = async () => {
     process.exit(1);
   }
 };
+
+// Graceful shutdown
+const gracefulShutdown = async () => {
+  logger.info('Shutting down gracefully...');
+  try {
+    await stopConversationWorker();
+    await closeConversationQueue();
+    await closeQueueConnection();
+    logger.info('Queues closed successfully');
+    process.exit(0);
+  } catch (error) {
+    logger.err('Error during shutdown:', error);
+    process.exit(1);
+  }
+};
+
+process.on('SIGTERM', gracefulShutdown);
+process.on('SIGINT', gracefulShutdown);
 
 startServer();
 

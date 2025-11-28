@@ -2,7 +2,7 @@ import { BaseMicroAgent } from './base-micro-agent';
 import { generateText } from 'ai';
 import { getModel } from '../openrouter';
 import { AI_CONFIG } from '../config';
-import { retrievalRAG } from '@/lib/db/repositories/rag';
+import { retrievalRAG } from '../../db/repositories/rag';
 import type {
   MicroAgentConfig,
   MicroAgentExecutionContext,
@@ -10,7 +10,7 @@ import type {
   MicroAgentIterationState,
   MicroAgentResult
 } from '../types/micro-agent-types';
-import type { UserDocument } from '@/lib/db/repositories/user-documents';
+import type { UserDocument } from '../../db/repositories/user-documents';
 
 /**
  * Context Search Result structure
@@ -308,5 +308,6 @@ export function createContextSearchAgent(
 
   return new ContextSearchAgent(uid, documents);
 }
+
 
 

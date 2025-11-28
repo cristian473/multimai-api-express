@@ -2,7 +2,7 @@ import { Request, Response } from 'express';
 import HttpStatusCodes from '../../constants/HttpStatusCodes';
 import wsService from './ws.service';
 import { WhatsAppWebhookPayload, ActivateAgentRequest } from './ws.dto';
-import { RouteError } from '@/other/errorHandler';
+import { RouteError } from '../../other/errorHandler';
 
 /**
  * Webhook endpoint to receive WhatsApp messages

@@ -13,6 +13,7 @@ import { generateText } from 'ai';
 import { getModel } from '../openrouter';
 import { AI_CONFIG } from '../config';
 import type { ContextSearchResult } from './context-search-agent';
+import { loadConversationForLLM } from '../context/conversation-loader';
 
 /**
  * Chain of Thought Reasoning Agent
@@ -71,7 +72,7 @@ export class ChainOfThoughtAgent extends BaseMicroAgent {
     console.log(`[${this.config.id}] Generating chain of thought reasoning...`);
 
     // Build reasoning prompt
-    const reasoningPrompt = this.buildReasoningPrompt(context);
+    const reasoningPrompt = await this.buildReasoningPrompt(context);
 
     // Execute reasoning with LLM
     const model = getModel(AI_CONFIG?.COMPOSER_MODEL_HIGH ?? 'gpt-4o-mini');
@@ -119,12 +120,10 @@ export class ChainOfThoughtAgent extends BaseMicroAgent {
     };
   }
 
-  private buildReasoningPrompt(context: MicroAgentExecutionContext): string {
+  private async buildReasoningPrompt(context: MicroAgentExecutionContext): Promise<string> {
     // Historial reciente (últimos 10 mensajes)
-    const conversationHistory = context.conversationContext.messages
-      .slice(-50)
-      .map(m => `${m.role}: ${m.content}`)
-      .join('\n');
+    const {messages} = await loadConversationForLLM(context.uid, context.userPhone);
+    const conversationHistory = messages.join('\n');
 
     // Guidelines con prioridad
     const guidelinesToUse = this.guidelines.length > 0

@@ -2,7 +2,7 @@
 import { Request, Response } from 'express';
 import HttpStatusCodes from '../../constants/HttpStatusCodes';
 import remindersService from './reminders.service';
-import { RouteError } from '@/other/errorHandler';
+import { RouteError } from '../../other/errorHandler';
 
 export async function processTodayReminders(req: Request, res: Response) {
   try {

@@ -4,16 +4,16 @@ import {
   queryProperties,
   queryPropertiesRAG,
   formatSearchResults,
-} from "@/lib/utils/search-properties";
+} from "../../utils/search-properties";
 import { getUserConfig } from "../../db/repositories/users";
-import { saveConversationMessage, saveMultimaiMessage, getRecentUserMessages } from "@/lib/db/repositories/conversations";
+import { saveConversationMessage, saveMultimaiMessage, getRecentUserMessages } from "../../db/repositories/conversations";
 import { db } from "../../db/firebase";
 import { wsProxyClient } from "../../other/wsProxyClient";
 import { propertyVisits } from "../../db/constants";
 import { getPropertyById } from "../../db/repositories/properties";
 import { retrievalRAG } from "../../db/repositories/rag";
 import { generateObject } from "ai";
-import { getModel, getOpenRouterModel } from "../../ai/openrouter";
+import { getModel } from "../../ai/openrouter";
 import { AI_CONFIG } from "../../ai/config";
 import { cacheFn, cacheSearchFn } from "../../cache";
 import { Propiedad } from "../../db/types";
@@ -326,6 +326,7 @@ Return scores in the same order as the properties.`,
 /**
  * Internal function for RAG search with reranking
  * Separated to allow flexible caching
+ * NOTE: Do NOT call saveConversationMessage inside this function - it's cached!
  */
 async function executeRAGSearchInternal(
   uid: string,
@@ -337,7 +338,6 @@ async function executeRAGSearchInternal(
   const { propertiesToShow, message } = formatSearchResults(searchResult);
 
   if (propertiesToShow.length === 0) {
-    await saveConversationMessage(uid, userPhone, 'assistant', `tool executed: search_properties_rag - no properties found`, undefined, true);
     return {
       searchId: null,
       count: 0,
@@ -345,6 +345,7 @@ async function executeRAGSearchInternal(
       contextMessage: searchResult.additionalText || 'No encontré propiedades con esos criterios.',
       onlyMessage: true,
       formattedProperties: '',
+      resultType: 'no_properties_found', // Used for context logging outside cache
     };
   }
 
@@ -370,7 +371,6 @@ async function executeRAGSearchInternal(
 
   // Handle case when no properties are relevant after reranking
   if (rerankedProperties.length === 0) {
-    await saveConversationMessage(uid, userPhone, 'assistant', `tool executed: search_properties_rag - no relevant properties after rerank`, undefined, true);
     return {
       searchId: null,
       count: 0,
@@ -378,6 +378,7 @@ async function executeRAGSearchInternal(
       contextMessage: 'No encontré propiedades que coincidan exactamente con tu búsqueda. ¿Quieres que ajuste los criterios?',
       onlyMessage: true,
       formattedProperties: '',
+      resultType: 'no_relevant_after_rerank', // Used for context logging outside cache
     };
   }
 
@@ -386,21 +387,10 @@ async function executeRAGSearchInternal(
     ? formatPropertyAsText(rerankedProperties[0])
     : rerankedProperties.map((property) => formatPropertySummary(property)).join("\n\n");
 
-  console.log(formattedSummaries);
-
   const searchId = generateSearchId();
 
   // Cache results in local cache too
   searchResultsCache.set(searchId, formattedSummaries);
-
-  await saveConversationMessage(
-    uid,
-    userPhone,
-    'assistant',
-    `tool executed: search_properties_rag - ${rerankedProperties.length} relevant properties found after LLM rerank`,
-    undefined,
-    true
-  );
 
   return {
     searchId,
@@ -410,6 +400,7 @@ async function executeRAGSearchInternal(
     onlyMessage: false,
     formattedProperties: formattedSummaries,
     searchType: 'hybrid_rag_with_rerank',
+    resultType: 'success', // Used for context logging outside cache
   };
 }
 
@@ -482,6 +473,25 @@ export const searchPropertiesRAGTool = (uid: string, userPhone: string) =>
             paramsExtractor: (args) => args[2], // Extract params (third argument)
           }
         );
+
+        // Save context message OUTSIDE of cached function (always executes)
+        let contextLogMessage = '';
+        switch (result.resultType) {
+          case 'no_properties_found':
+            contextLogMessage = `tool executed: search_properties_rag - no properties found`;
+            break;
+          case 'no_relevant_after_rerank':
+            contextLogMessage = `tool executed: search_properties_rag - no relevant properties after rerank`;
+            break;
+          case 'success':
+            contextLogMessage = `tool executed: search_properties_rag - ${result.count} relevant properties found after LLM rerank`;
+            break;
+          default:
+            contextLogMessage = `tool executed: search_properties_rag - params: ${JSON.stringify(params)}`;
+        }
+        
+        // Use role 'system' for context messages
+        await saveConversationMessage(uid, userPhone, 'system', contextLogMessage, undefined, true);
 
         return result.formattedProperties ?? 'No se encontraron propiedades';
       } catch (error) {
@@ -703,12 +713,12 @@ export const getHelpTool = (uid: string, userPhone: string, userName: string) =>
           context: {
             question: question,
             recentMessages: recentMessages.map(msg => {
-              const msgData: { content: string; chat_message_id?: string } = {
+              const msgData: { content: string; chatMessageId?: string } = {
                 content: msg.content,
               };
-              // Solo agregar chat_message_id si existe
-              if (msg.chat_message_id) {
-                msgData.chat_message_id = msg.chat_message_id;
+              // Solo agregar chatMessageId si existe
+              if (msg.chatMessageId) {
+                msgData.chatMessageId = msg.chatMessageId;
               }
               return msgData;
             }),
@@ -727,7 +737,7 @@ export const getHelpTool = (uid: string, userPhone: string, userName: string) =>
         // Enviar mensaje al dueño por WhatsApp
         const messageToOwner = `Hola!, el número ${userPhone} (${userName}) necesita ayuda con la pregunta:\n\n*${question}*\n\n_Request ID: ${requestId}_`;
 
-        await saveConversationMessage(uid, userPhone, 'assistant', `tool executed: get_help - message to owner: ${messageToOwner}`, undefined, true);
+        await saveConversationMessage(uid, userPhone, 'system', `tool executed: get_help - message to owner: ${messageToOwner}`, undefined, true);
 
         await wsProxyClient.post(`/ws/send-message`, {
           chatId: reportsNumber,
@@ -912,6 +922,7 @@ export const getAvailabilityToVisitPropertyTool = (uid: string, userPhone: strin
         }
 
         // Use cache for visit availability
+        // NOTE: Do NOT call saveConversationMessage inside cached function!
         const cachedResult = await cacheFn(
           async (uid: string, propertyId: string, userPhone: string) => {
             const visitsSnapshot = await getVisitsCollection(uid)
@@ -925,6 +936,7 @@ export const getAvailabilityToVisitPropertyTool = (uid: string, userPhone: strin
                 success: true,
                 visits: [],
                 message: "No hay visitas programadas, PRIMERO consultar día y hora de disponibilidad del usuario, LUEGO utilizar ask_for_availability para consultar al dueño",
+                _futureVisitsForContext: [], // For context logging outside cache
               };
             }
 
@@ -944,7 +956,6 @@ export const getAvailabilityToVisitPropertyTool = (uid: string, userPhone: strin
               return visitDateTime >= now;
             });
 
-            await saveConversationMessage(uid, userPhone, 'assistant', `tool executed: get_availability_to_visit_the_property - future visits: ${JSON.stringify(futureVisits)}`, undefined, true);
             console.log("[getAvailabilityToVisitPropertyTool] Future visits:", futureVisits);
 
             return {
@@ -962,6 +973,7 @@ export const getAvailabilityToVisitPropertyTool = (uid: string, userPhone: strin
                   note: v.notes || undefined,
                 };
               }),
+              _futureVisitsForContext: futureVisits, // For context logging outside cache
             };
           },
           [uid, property_id, userPhone],
@@ -978,7 +990,20 @@ export const getAvailabilityToVisitPropertyTool = (uid: string, userPhone: strin
           }
         );
 
-        return JSON.stringify(cachedResult);
+        // Save context message OUTSIDE of cached function (always executes)
+        const visitsCount = cachedResult._futureVisitsForContext?.length ?? cachedResult.visits?.length ?? 0;
+        await saveConversationMessage(
+          uid, 
+          userPhone, 
+          'system', 
+          `tool executed: get_availability_to_visit_the_property - property: ${property_id}, future visits count: ${visitsCount}`,
+          undefined, 
+          true
+        );
+
+        // Remove internal context field before returning
+        const { _futureVisitsForContext, ...resultToReturn } = cachedResult;
+        return JSON.stringify(resultToReturn);
       } catch (error) {
         console.error("Error fetching visits:", error);
         return JSON.stringify({
@@ -1017,7 +1042,7 @@ export const createNewPropertyVisitTool = (
           });
         }
 
-        await saveConversationMessage(uid, userPhone, 'assistant', `tool executed: create_new_property_visit with parameters: ${JSON.stringify({ property_id, date, start_time })}`, undefined, true);
+        await saveConversationMessage(uid, userPhone, 'system', `tool executed: create_new_property_visit with parameters: ${JSON.stringify({ property_id, date, start_time })}`, undefined, true);
         const visitDate = new Date(date);
         
         // Check if user is already scheduled for a visit to this property on this date
@@ -1104,7 +1129,7 @@ export const createNewPropertyVisitTool = (
           // Don't fail the visit creation if reminders fail
         }
 
-        await saveConversationMessage(uid, userPhone, 'assistant', `tool executed: create_new_property_visit - visit created: ${visitRef.id}`, undefined, true);
+        await saveConversationMessage(uid, userPhone, 'system', `tool executed: create_new_property_visit - visit created: ${visitRef.id}`, undefined, true);
 
         return JSON.stringify({
           success: true,
@@ -1134,7 +1159,7 @@ export const addVisitorToScheduledVisitTool = (
     }),
     execute: async ({ property_visit_id }) => {
       try {
-        await saveConversationMessage(uid, userPhone, 'assistant', `tool executed: add_visitor_to_scheduled_visit with parameters: ${JSON.stringify({ property_visit_id })}`, undefined, true);
+        await saveConversationMessage(uid, userPhone, 'system', `tool executed: add_visitor_to_scheduled_visit with parameters: ${JSON.stringify({ property_visit_id })}`, undefined, true);
           const visitRef = getVisitsCollection(uid).doc(property_visit_id);
           const visitDoc = await visitRef.get();
 
@@ -1169,7 +1194,7 @@ export const addVisitorToScheduledVisitTool = (
         );
 
         if (alreadyRegistered) {
-          await saveConversationMessage(uid, userPhone, 'assistant', `tool executed: add_visitor_to_scheduled_visit - client already registered`, undefined, true);
+          await saveConversationMessage(uid, userPhone, 'system', `tool executed: add_visitor_to_scheduled_visit - client already registered`, undefined, true);
           return JSON.stringify({
             success: true,
             already_scheduled: true,
@@ -1222,7 +1247,7 @@ export const addVisitorToScheduledVisitTool = (
         }
 
         console.log("[addVisitorToScheduledVisitTool] Visit updated successfully");
-        await saveConversationMessage(uid, userPhone, 'assistant', `tool executed: add_visitor_to_scheduled_visit - visit ${property_visit_id} updated successfully with date ${visitData.date} and start time ${visitData.start_time} and ${visitors.length} visitors`, undefined, true);
+        await saveConversationMessage(uid, userPhone, 'system', `tool executed: add_visitor_to_scheduled_visit - visit ${property_visit_id} updated successfully with date ${visitData.date} and start time ${visitData.start_time} and ${visitors.length} visitors`, undefined, true);
 
           return JSON.stringify({
             success: true,
@@ -1359,12 +1384,12 @@ export const askForAvailabilityTool = (
             suggested_days: suggested_days && suggested_days.trim() !== "" ? suggested_days : "No especificado",
             suggested_times: suggested_times && suggested_times.trim() !== "" ? suggested_times : "No especificado",
             recentMessages: recentMessages.map(msg => {
-              const msgData: { content: string; chat_message_id?: string } = {
+              const msgData: { content: string; chatMessageId?: string } = {
                 content: msg.content,
               };
-              // Solo agregar chat_message_id si existe
-              if (msg.chat_message_id) {
-                msgData.chat_message_id = msg.chat_message_id;
+              // Solo agregar chatMessageId si existe
+              if (msg.chatMessageId) {
+                msgData.chatMessageId = msg.chatMessageId;
               }
               return msgData;
             }),
@@ -1447,7 +1472,7 @@ export const cancelVisitTool = (
         await saveConversationMessage(
           uid,
           userPhone,
-          "assistant",
+          "system",
           `tool executed: cancel_visit with parameters: ${JSON.stringify({ property_id })}`,
           undefined,
           true
@@ -1463,7 +1488,7 @@ export const cancelVisitTool = (
           await saveConversationMessage(
             uid,
             userPhone,
-            "assistant",
+            "system",
             `tool executed: cancel_visit - no scheduled visits found`,
             undefined,
             true
@@ -1496,7 +1521,7 @@ export const cancelVisitTool = (
           await saveConversationMessage(
             uid,
             userPhone,
-            "assistant",
+            "system",
             `tool executed: cancel_visit - user not found in any visit`,
             undefined,
             true
@@ -1536,7 +1561,7 @@ export const cancelVisitTool = (
         await saveConversationMessage(
           uid,
           userPhone,
-          "assistant",
+          "system",
           `tool executed: cancel_visit - visit cancelled successfully for date ${visitDate} at ${visitToUpdate.startTime}`,
           undefined,
           true
@@ -1582,7 +1607,7 @@ export const rescheduleVisitTool = (
         await saveConversationMessage(
           uid,
           userPhone,
-          "assistant",
+          "system",
           `tool executed: reschedule_visit with parameters: ${JSON.stringify({ property_id })}`,
           undefined,
           true
@@ -1599,7 +1624,7 @@ export const rescheduleVisitTool = (
           await saveConversationMessage(
             uid,
             userPhone,
-            "assistant",
+            "system",
             `tool executed: reschedule_visit - no scheduled visits found`,
             undefined,
             true
@@ -1634,7 +1659,7 @@ export const rescheduleVisitTool = (
           await saveConversationMessage(
             uid,
             userPhone,
-            "assistant",
+            "system",
             `tool executed: reschedule_visit - user not found in any visit`,
             undefined,
             true
@@ -1675,7 +1700,7 @@ export const rescheduleVisitTool = (
         await saveConversationMessage(
           uid,
           userPhone,
-          "assistant",
+          "system",
           `tool executed: reschedule_visit - old visit cancelled, ready for new scheduling. Old date: ${oldVisitDate} at ${visitToUpdate.startTime}`,
           undefined,
           true
@@ -1733,7 +1758,7 @@ export const logFeedbackTool = (
         await saveConversationMessage(
           uid,
           userPhone,
-          "assistant",
+          "system",
           `tool executed: log_feedback with parameters: ${JSON.stringify({ feedback, property_id, feedback_type })}`,
           undefined,
           true
@@ -1798,7 +1823,7 @@ export const logFeedbackTool = (
         await saveConversationMessage(
           uid,
           userPhone,
-          "assistant",
+          "system",
           `tool executed: log_feedback - message sent to owner: ${messageToOwner}`,
           undefined,
           true
@@ -1868,7 +1893,7 @@ export const createReminderTool = (
         await saveConversationMessage(
           uid,
           userPhone,
-          "assistant",
+          "system",
           `tool executed: create_reminder with parameters: ${JSON.stringify({ toRemember, eventDateTime, metadata })}`,
           undefined,
           true
@@ -1911,7 +1936,7 @@ export const createReminderTool = (
           context: {
             recentMessages: recentMessages.map(msg => ({
               content: msg.content,
-              chat_message_id: msg.chat_message_id,
+              chatMessageId: msg.chatMessageId,
               timestamp: msg.timestamp,
             })),
             metadata: metadata,
@@ -1943,7 +1968,7 @@ export const createReminderTool = (
         await saveConversationMessage(
           uid,
           userPhone,
-          "assistant",
+          "system",
           `tool executed: create_reminder - reminder created: ${reminderRef.id} for ${eventDateStr}`,
           undefined,
           true
@@ -2048,7 +2073,7 @@ export const getVisitStatusTool = (uid: string) =>
         await saveConversationMessage(
           uid,
           visitData?.visitors?.[0]?.phone || 'unknown',
-          "assistant",
+          "system",
           `tool executed: get_visit_status - visit queried: ${visit_id}`,
           undefined,
           true
@@ -2096,7 +2121,7 @@ export const searchContextTool = (uid: string, userPhone: string) =>
         await saveConversationMessage(
           uid,
           userPhone,
-          "assistant",
+          "system",
           `tool executed: search_context with query: "${query}"`,
           undefined,
           true
@@ -2154,7 +2179,7 @@ export const searchContextTool = (uid: string, userPhone: string) =>
         await saveConversationMessage(
           uid,
           userPhone,
-          "assistant",
+          "system",
           `tool executed: search_context - found ${filteredResults.length} results`,
           undefined,
           true

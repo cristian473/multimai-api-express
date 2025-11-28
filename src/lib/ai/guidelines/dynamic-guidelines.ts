@@ -1,5 +1,5 @@
 import type { Guideline } from '../types/guideline';
-import type { UserDocument } from '@/lib/db/repositories/user-documents';
+import type { UserDocument } from '../../db/repositories/user-documents';
 
 /**
  * Generate a dynamic context search guideline based on user's uploaded documents
@@ -117,5 +117,6 @@ export function mergeGuidelines(
 
   return Array.from(guidelineMap.values());
 }
+
 
 

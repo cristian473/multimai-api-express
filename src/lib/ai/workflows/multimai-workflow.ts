@@ -104,13 +104,13 @@ console.log({uid})
   const messages = conversationMessages.slice(-20).map(msg => ({
     role: msg.role as 'user' | 'assistant' | 'system',
     content: msg.content,
-    chat_message_id: msg.chat_message_id
+    chatMessageId: msg.chatMessageId
   }));
 
   messages.push({
     role: 'user',
     content: message ?? '(no message provided)',
-    chat_message_id: undefined
+    chatMessageId: undefined
   });
 
   console.log('[MultimaiWorkflow] Messages:', messages);

@@ -1,4 +1,4 @@
-import { db } from "@/lib/db/firebase";
+import { db } from "../../db/firebase";
 
 /**
  * Identifica si un usuario es un inquilino (tenant) o un interesado (prospect)

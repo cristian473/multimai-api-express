@@ -3,8 +3,8 @@
  * Simplified and modular version
  */
 
-import { ChatConfig } from "@/lib/utils/validation";
-import { saveConversationMessage } from "@/lib/db/repositories/conversations";
+import { ChatConfig } from "../../utils/validation";
+import { saveConversationMessage } from "../../db/repositories/conversations";
 import { GuidelineAgent } from "../guideline-agent";
 import { multimaiGuidelines } from "../guidelines/multimai-guidelines";
 import { realEstateGlossary } from "../glossary/real-estate-terms";
@@ -191,15 +191,26 @@ function registerContextVariables(
     () => `El número de teléfono del usuario es: ${customerPhone}`
   );
 
-  agent.registerVariable(
-    'nombre_negocio',
-    () => `El agente trabaja para la inmobiliaria: ${userConfig.business.businessName}`
-  );
+  if(userConfig.business.businessName) {
+    agent.registerVariable(
+      'nombre_negocio',
+      () => `El agente trabaja para la inmobiliaria: ${userConfig.business.businessName}`
+    );
+  }
 
-  agent.registerVariable(
-    'nombre_agente',
-    () => `Tu nombre es: ${userConfig.config.agentName}`
-  );
+  if(userConfig.config.agentName) {
+    agent.registerVariable(
+      'nombre_agente',
+      () => `Tu nombre es: ${userConfig.config.agentName}`
+    );
+  }
+
+  if(userConfig.business.businessContext) {
+    agent.registerVariable(
+      'contexto_negocio',
+      () => `Algunos datos del negocio: ${userConfig.business.businessContext}`
+    );
+  }
 
   console.log('[Workflow] Registered context variables');
 }
@@ -389,7 +400,37 @@ export async function mainGuidelinesWorkflow(
 
   console.log('[Workflow] Response generated');
 
-  // ========== STEP 17: Save Assistant Response ==========
+  // ========== STEP 17: Save Tool Executions as Context Messages ==========
+  const toolExecutions = result.executionTrace.filter((t: any) => t.step === 'tool_execution');
+  
+  if (toolExecutions.length > 0) {
+    console.log(`[Workflow] Saving ${toolExecutions.length} tool executions as context messages`);
+    
+    for (const execution of toolExecutions) {
+      try {
+        // Format tool execution as context message
+        const contextContent = JSON.stringify({
+          tool: execution.toolName,
+          args: execution.args,
+          result: execution.result
+        }, null, 2);
+        
+        // Save as context message (isContext: true) with system role
+        await saveConversationMessage(
+          uid, 
+          userPhone, 
+          'system', // Use system role for context/tool results
+          `[Tool: ${execution.toolName}]\n${contextContent}`,
+          undefined, // No messageId
+          true // isContext flag
+        );
+      } catch (err) {
+        console.error(`[Workflow] Error saving tool execution ${execution.toolName}:`, err);
+      }
+    }
+  }
+
+  // ========== STEP 18: Save Assistant Response ==========
   await saveConversationMessage(uid, userPhone, 'assistant', result.response);
 
   console.log("========== GUIDELINES WORKFLOW END ==========\n");
@@ -398,7 +439,7 @@ export async function mainGuidelinesWorkflow(
     message: result.response,
     metadata: {
       selectedGuidelines: result.state.activeGuidelines.map((g: any) => g.guideline.id),
-      executedAgents: result.executionTrace.filter((t: any) => t.step === 'tool_execution').length,
+      executedAgents: toolExecutions.length,
     },
   };
 }

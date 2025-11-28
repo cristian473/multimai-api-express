@@ -1,5 +1,5 @@
 import { Router, Request, Response } from "express";
-import { wsRoutes, remindersRoutes, cacheRoutes } from "./entities";
+import { wsRoutes, remindersRoutes, cacheRoutes, paddleRoutes } from "./entities";
 import { verifyToken } from "./middlewares/tokenVerification";
 import cronRouter from "./routes/cron";
 
@@ -19,5 +19,8 @@ apiRouter.use('/cache', cacheRoutes);
 
 // Rutas de Cron (para ejecución manual)
 apiRouter.use('/cron', cronRouter);
+
+// Rutas de Paddle (subscripciones y pagos)
+apiRouter.use('/paddle', paddleRoutes);
 
 export default apiRouter

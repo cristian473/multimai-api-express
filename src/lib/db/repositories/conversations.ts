@@ -2,16 +2,20 @@ import { db, admin } from "../firebase";
 
 const FieldValue = admin.firestore.FieldValue;
 import {
-  conversationDoc,
-  messagesCollection,
+  conversationsCollection,
+  messagesCollection as legacyMessagesCollection,
   multimaiMessagesCollection,
+  customersCollection,
 } from "../constants";
 import { ConversationMessage } from "../types";
 import { generateObject } from "ai";
 import { getModel } from "../../ai/openrouter";
 import { AI_CONFIG } from "../../ai/config";
 import { z } from "zod";
+import { scheduleConversationClose } from "../../queues/conversation-queue";
+import logger from "jet-logger";
 
+// Legacy function - kept for backward compatibility with old conversations
 function getTodayDateKey(): string {
   const now = new Date();
   const day = String(now.getDate()).padStart(2, "0");
@@ -20,69 +24,185 @@ function getTodayDateKey(): string {
   return `${day}${month}${year}`;
 }
 
-export async function saveConversationMessage(
+// Helper to get messages collection path
+function getMessagesCollection(uid: string, phone: string, conversationId: string): string {
+  return `users/${uid}/customers/${phone}/conversations/${conversationId}/messages`;
+}
+
+/**
+ * Get or create an active conversation for a customer
+ * Uses new schema with isOpen flag and auto-generated Firestore ID
+ */
+async function getOrCreateActiveConversation(
   uid: string,
   phone: string,
-  role: "user" | "assistant",
-  content: string,
-  messageId?: string, // ID del mensaje de WhatsApp (opcional)
-  isContext?: boolean, // Flag para marcar mensajes de contexto (ejecuciones de tools, logs internos)
-): Promise<void> {
+  customerName?: string
+): Promise<{ conversationId: string; isNew: boolean }> {
   try {
-    const dateKey = getTodayDateKey();
+    // Check if customer has an active conversation
+    const customerRef = db.doc(`users/${uid}/customers/${phone}`);
+    const customerSnapshot = await customerRef.get();
 
-    // Create or update conversation document
-    const conversationRef = db.doc(conversationDoc(uid, phone, dateKey));
-    const conversationSnapshot = await conversationRef.get();
+    if (customerSnapshot.exists) {
+      const customerData = customerSnapshot.data();
+      const activeConversationId = customerData?.activeConversationId;
 
-    if (!conversationSnapshot.exists) {
-      await conversationRef.set({
-        date: dateKey,
-        created_at: FieldValue.serverTimestamp(),
-        summary: "",
-        message_count: 0,
+      if (activeConversationId) {
+        // Verify the conversation exists and is open
+        const conversationRef = db.doc(
+          `users/${uid}/customers/${phone}/conversations/${activeConversationId}`
+        );
+        const conversationSnapshot = await conversationRef.get();
+
+        if (conversationSnapshot.exists && conversationSnapshot.data()?.isOpen === true) {
+          return { conversationId: activeConversationId, isNew: false };
+        }
+      }
+    }
+
+    // Create new conversation with auto-generated Firestore ID
+    const conversationsRef = db.collection(`users/${uid}/customers/${phone}/conversations`);
+    const newConversationRef = conversationsRef.doc(); // Auto-generate ID
+    const conversationId = newConversationRef.id;
+
+    await newConversationRef.set({
+      isOpen: true,
+      createdAt: FieldValue.serverTimestamp(),
+      lastMessageAt: FieldValue.serverTimestamp(),
+      messageCount: 0,
+    });
+
+    // Update customer with active conversation ID
+    if (customerSnapshot.exists) {
+      await customerRef.update({
+        activeConversationId: conversationId,
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+    } else {
+      // Create customer document if it doesn't exist
+      await customerRef.set({
+        name: customerName || phone,
+        phone: phone,
+        activeConversationId: conversationId,
+        createdAt: FieldValue.serverTimestamp(),
+        updatedAt: FieldValue.serverTimestamp(),
       });
     }
 
-    // Save individual message with optional messageId and isContext flag
-    const messageData: any = {
-      role,
-      content,
-      timestamp: FieldValue.serverTimestamp(),
-    };
-
-    // Si hay messageId, agregarlo para poder referenciar el mensaje después
-    if (messageId) {
-      messageData.chat_message_id = messageId;
-    }
-
-    // Si es un mensaje de contexto, marcarlo
-    if (isContext) {
-      messageData.isContext = true;
-    }
-
-    await db.collection(messagesCollection(uid, phone, dateKey)).add(messageData);
-
-    // Increment message count
-    await conversationRef.update({
-      message_count: FieldValue.increment(1),
-      last_message_at: FieldValue.serverTimestamp(),
-    });
+    logger.info(`[Conversations] Created new conversation ${conversationId} for ${phone}`);
+    return { conversationId, isNew: true };
   } catch (error) {
-    console.error("Error saving conversation message:", error);
+    logger.err("[Conversations] Error getting/creating active conversation:", error);
+    throw error;
   }
 }
 
-export async function getTodayConversationMessages(
+/**
+ * Save a message to the active conversation (new schema)
+ * Automatically schedules conversation close job after 60 minutes
+ * Uses messageId as document ID when provided to avoid duplicates
+ */
+export async function saveConversationMessage(
   uid: string,
   phone: string,
-  includeContext: boolean = false, // Flag para incluir o excluir mensajes de contexto
+  role: "user" | "assistant" | "system",
+  content: string,
+  messageId?: string,
+  isContext?: boolean,
+  customerName?: string
+): Promise<void> {
+
+  console.log('saveConversationMessage', { uid, phone, role, content, messageId, isContext, customerName });
+  // Get or create active conversation
+  const { conversationId, isNew } = await getOrCreateActiveConversation(uid, phone, customerName);
+
+  logger.info(`[Conversations] Saving ${role} message to conversation ${conversationId} (isContext: ${isContext || false})`);
+
+  // Save message
+  const messageData: any = {
+    role,
+    content,
+    timestamp: FieldValue.serverTimestamp(),
+  };
+
+  if (messageId) {
+    messageData.chatMessageId = messageId;
+  }
+
+  if (isContext) {
+    messageData.isContext = true;
+  }
+
+  const messagesCollection = db.collection(getMessagesCollection(uid, phone, conversationId));
+  console.log('messagesCollection', messagesCollection);
+
+  // Use messageId as document ID when available to prevent duplicates
+  if (messageId) {
+    console.log('messageId', messageId);
+    // Use set with merge to avoid overwriting if message already exists
+    await messagesCollection.doc(messageId).set(messageData, { merge: true });
+    logger.info(`[Conversations] Saved ${role} message with ID ${messageId}`);
+  } else {
+    console.log('messageId not found');
+    // Generate random ID for messages without ID (assistant messages, context, etc.)
+    const docRef = await messagesCollection.add(messageData);
+    logger.info(`[Conversations] Saved ${role} message with auto-generated ID ${docRef.id}`);
+  }
+
+  // Update conversation metadata
+  const conversationRef = db.doc(
+    `users/${uid}/customers/${phone}/conversations/${conversationId}`
+  );
+  await conversationRef.update({
+    messageCount: FieldValue.increment(1),
+    lastMessageAt: FieldValue.serverTimestamp(),
+  });
+
+  // Schedule/reschedule conversation close job (60 min sliding window)
+  // This is fire-and-forget - don't fail the message save if queue fails
+  try {
+    const name = customerName || (await getCustomerName(uid, phone)) || phone;
+    await scheduleConversationClose(uid, phone, conversationId, name);
+  } catch (queueError) {
+    logger.err(`[Conversations] Error scheduling conversation close (non-fatal): ${queueError}`);
+    // Don't throw - queue failure shouldn't prevent message from being saved
+  }
+}
+
+/**
+ * Get customer name from database
+ */
+async function getCustomerName(uid: string, phone: string): Promise<string | null> {
+  try {
+    const customerRef = db.doc(`users/${uid}/customers/${phone}`);
+    const customerSnapshot = await customerRef.get();
+    return customerSnapshot.data()?.name || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Get messages from the active conversation (new schema)
+ */
+export async function getActiveConversationMessages(
+  uid: string,
+  phone: string,
+  includeContext: boolean = false
 ): Promise<ConversationMessage[]> {
   try {
-    const dateKey = getTodayDateKey();
+    // Get active conversation ID
+    const customerRef = db.doc(`users/${uid}/customers/${phone}`);
+    const customerSnapshot = await customerRef.get();
+    const activeConversationId = customerSnapshot.data()?.activeConversationId;
+
+    if (!activeConversationId) {
+      // Fallback to legacy date-based lookup
+      return getTodayConversationMessagesLegacy(uid, phone, includeContext);
+    }
 
     const messagesSnapshot = await db
-      .collection(messagesCollection(uid, phone, dateKey))
+      .collection(getMessagesCollection(uid, phone, activeConversationId))
       .orderBy("timestamp", "asc")
       .get();
 
@@ -94,35 +214,114 @@ export async function getTodayConversationMessages(
       role: doc.data().role,
       content: doc.data().content,
       timestamp: doc.data().timestamp,
-      whatsapp_message_id: doc.data().whatsapp_message_id,
+      whatsappMessageId: doc.data().chatMessageId,
       isContext: doc.data().isContext || false,
     }));
 
-    // Filtrar mensajes de contexto si includeContext es false
     if (!includeContext) {
       return messages.filter((msg) => !msg.isContext);
     }
 
     return messages;
   } catch (error) {
-    console.error("Error getting today conversation messages:", error);
+    logger.err("[Conversations] Error getting active conversation messages:", error);
     return [];
   }
 }
 
 /**
- * Obtiene solo los mensajes de contexto del día actual
- * Útil para generar resúmenes de contexto con LLM
+ * Legacy function for backward compatibility - get today's messages by date key
  */
-export async function getTodayContextMessages(
+export async function getTodayConversationMessagesLegacy(
   uid: string,
   phone: string,
+  includeContext: boolean = false
 ): Promise<ConversationMessage[]> {
   try {
     const dateKey = getTodayDateKey();
 
     const messagesSnapshot = await db
-      .collection(messagesCollection(uid, phone, dateKey))
+      .collection(legacyMessagesCollection(uid, phone, dateKey))
+      .orderBy("timestamp", "asc")
+      .get();
+
+    if (messagesSnapshot.empty) {
+      return [];
+    }
+
+    const messages = messagesSnapshot.docs.map((doc) => ({
+      role: doc.data().role,
+      content: doc.data().content,
+      timestamp: doc.data().timestamp,
+      whatsappMessageId: doc.data().whatsapp_message_id || doc.data().chatMessageId,
+      isContext: doc.data().isContext || false,
+    }));
+
+    if (!includeContext) {
+      return messages.filter((msg) => !msg.isContext);
+    }
+
+    return messages;
+  } catch (error) {
+    logger.err("[Conversations] Error getting today conversation messages:", error);
+    return [];
+  }
+}
+
+/**
+ * Get today's conversation messages - wrapper that tries new schema first, then legacy
+ */
+export async function getTodayConversationMessages(
+  uid: string,
+  phone: string,
+  includeContext: boolean = false
+): Promise<ConversationMessage[]> {
+  // Try new schema first
+  const activeMessages = await getActiveConversationMessages(uid, phone, includeContext);
+  if (activeMessages.length > 0) {
+    return activeMessages;
+  }
+
+  // Fallback to legacy
+  return getTodayConversationMessagesLegacy(uid, phone, includeContext);
+}
+
+/**
+ * Get context messages from active conversation
+ */
+export async function getTodayContextMessages(
+  uid: string,
+  phone: string
+): Promise<ConversationMessage[]> {
+  try {
+    // Get active conversation ID
+    const customerRef = db.doc(`users/${uid}/customers/${phone}`);
+    const customerSnapshot = await customerRef.get();
+    const activeConversationId = customerSnapshot.data()?.activeConversationId;
+
+    if (!activeConversationId) {
+      // Fallback to legacy
+      const dateKey = getTodayDateKey();
+      const messagesSnapshot = await db
+        .collection(legacyMessagesCollection(uid, phone, dateKey))
+        .where("isContext", "==", true)
+        .orderBy("timestamp", "asc")
+        .get();
+
+      if (messagesSnapshot.empty) {
+        return [];
+      }
+
+      return messagesSnapshot.docs.map((doc) => ({
+        role: doc.data().role,
+        content: doc.data().content,
+        timestamp: doc.data().timestamp,
+        isContext: true,
+      }));
+    }
+
+    const messagesSnapshot = await db
+      .collection(getMessagesCollection(uid, phone, activeConversationId))
       .where("isContext", "==", true)
       .orderBy("timestamp", "asc")
       .get();
@@ -138,72 +337,164 @@ export async function getTodayContextMessages(
       isContext: true,
     }));
   } catch (error) {
-    console.error("Error getting today context messages:", error);
+    logger.err("[Conversations] Error getting context messages:", error);
     return [];
   }
 }
 
 /**
- * Obtiene los últimos N mensajes del usuario con sus IDs de WhatsApp
- * Útil para tener contexto cuando se solicita ayuda al dueño
+ * Get recent user messages with their WhatsApp IDs
  */
 export async function getRecentUserMessages(
   uid: string,
   phone: string,
-  limit: number = 10,
-): Promise<Array<{ content: string; chat_message_id?: string; timestamp: any }>> {
+  limit: number = 10
+): Promise<Array<{ content: string; chatMessageId?: string; timestamp: any }>> {
   try {
-    const dateKey = getTodayDateKey();
+    // Get active conversation ID
+    const customerRef = db.doc(`users/${uid}/customers/${phone}`);
+    const customerSnapshot = await customerRef.get();
+    const activeConversationId = customerSnapshot.data()?.activeConversationId;
 
-    const messagesSnapshot = await db
-      .collection(messagesCollection(uid, phone, dateKey))
-      .where("role", "==", "user")
-      .orderBy("timestamp", "desc")
-      .limit(limit)
-      .get();
+    let messagesSnapshot;
+
+    if (activeConversationId) {
+      messagesSnapshot = await db
+        .collection(getMessagesCollection(uid, phone, activeConversationId))
+        .where("role", "==", "user")
+        .orderBy("timestamp", "desc")
+        .limit(limit)
+        .get();
+    } else {
+      // Fallback to legacy
+      const dateKey = getTodayDateKey();
+      messagesSnapshot = await db
+        .collection(legacyMessagesCollection(uid, phone, dateKey))
+        .where("role", "==", "user")
+        .orderBy("timestamp", "desc")
+        .limit(limit)
+        .get();
+    }
 
     if (messagesSnapshot.empty) {
       return [];
     }
 
-    // Revertir el orden para que los mensajes más recientes estén al final
     return messagesSnapshot.docs.reverse().map((doc) => ({
       content: doc.data().content,
-      chat_message_id: doc.data().chat_message_id,
+      chatMessageId: doc.data().chatMessageId || doc.data().chat_message_id,
       timestamp: doc.data().timestamp,
     }));
   } catch (error) {
-    console.error("Error getting recent user messages:", error);
+    logger.err("[Conversations] Error getting recent user messages:", error);
     return [];
   }
 }
 
+/**
+ * Get summaries from previous closed conversations
+ */
 export async function getPreviousConversationSummaries(
   uid: string,
   phone: string,
-  limit: number = 5,
+  limit: number = 5
 ): Promise<any[]> {
   try {
-    const todayDateKey = getTodayDateKey();
+    // Get active conversation ID to exclude it
+    const customerRef = db.doc(`users/${uid}/customers/${phone}`);
+    const customerSnapshot = await customerRef.get();
+    const activeConversationId = customerSnapshot.data()?.activeConversationId;
 
+    // Get closed conversations ordered by creation date
     const conversationsSnapshot = await db
       .collection(`users/${uid}/customers/${phone}/conversations`)
-      .where("date", "<", todayDateKey)
-      .orderBy("date", "desc")
+      .where("isOpen", "==", false)
+      .orderBy("createdAt", "desc")
       .limit(limit)
       .get();
 
     if (conversationsSnapshot.empty) {
-      return [];
+      // Fallback to legacy query
+      const todayDateKey = getTodayDateKey();
+      const legacySnapshot = await db
+        .collection(`users/${uid}/customers/${phone}/conversations`)
+        .orderBy("date", "desc")
+        .limit(limit + 1)
+        .get();
+
+      return legacySnapshot.docs
+        .filter((doc) => doc.id !== todayDateKey)
+        .slice(0, limit)
+        .map((doc) => ({
+          id: doc.id,
+          date: doc.data().date || doc.id,
+          summary: doc.data().summary || "",
+          messageCount: doc.data().message_count || doc.data().messageCount || 0,
+        }));
     }
 
     return conversationsSnapshot.docs.map((doc) => ({
-      date: doc.data().date,
+      id: doc.id,
       summary: doc.data().summary || "",
-      message_count: doc.data().message_count || 0,
+      messageCount: doc.data().messageCount || 0,
+      createdAt: doc.data().createdAt,
+      closedAt: doc.data().closedAt,
     }));
   } catch (error) {
-    console.error("Error getting previous conversation summaries:", error);
+    logger.err("[Conversations] Error getting previous conversation summaries:", error);
+    return [];
+  }
+}
+
+/**
+ * Get all messages from all conversations for a customer
+ * Used for full BANT analysis
+ */
+export async function getAllCustomerMessages(
+  uid: string,
+  phone: string,
+  includeContext: boolean = true
+): Promise<Array<{ role: string; content: string; timestamp: any; isContext?: boolean }>> {
+  const allMessages: Array<{ role: string; content: string; timestamp: any; isContext?: boolean }> = [];
+
+  try {
+    const conversationsSnapshot = await db
+      .collection(`users/${uid}/customers/${phone}/conversations`)
+      .get();
+
+    for (const convDoc of conversationsSnapshot.docs) {
+      const messagesSnapshot = await db
+        .collection(`users/${uid}/customers/${phone}/conversations/${convDoc.id}/messages`)
+        .orderBy("timestamp", "asc")
+        .get();
+
+      for (const msgDoc of messagesSnapshot.docs) {
+        const data = msgDoc.data();
+        const isContextMsg = data.isContext || false;
+
+        if (!includeContext && isContextMsg) {
+          continue;
+        }
+
+        allMessages.push({
+          role: data.role,
+          content: data.content,
+          timestamp: data.timestamp?.toDate?.() || data.timestamp,
+          isContext: isContextMsg,
+        });
+      }
+    }
+
+    // Sort all messages by timestamp
+    allMessages.sort((a, b) => {
+      const timeA = a.timestamp instanceof Date ? a.timestamp.getTime() : new Date(a.timestamp).getTime();
+      const timeB = b.timestamp instanceof Date ? b.timestamp.getTime() : new Date(b.timestamp).getTime();
+      return timeA - timeB;
+    });
+
+    return allMessages;
+  } catch (error) {
+    logger.err("[Conversations] Error getting all customer messages:", error);
     return [];
   }
 }
@@ -211,7 +502,7 @@ export async function getPreviousConversationSummaries(
 // Multimai conversation functions
 export async function getMultimaiMessages(
   phone: string,
-  limit: number = 50,
+  limit: number = 50
 ): Promise<ConversationMessage[]> {
   try {
     const messagesSnapshot = await db
@@ -228,10 +519,10 @@ export async function getMultimaiMessages(
       role: doc.data().role,
       content: doc.data().content,
       timestamp: doc.data().timestamp,
-      chat_message_id: doc.data().chat_message_id,
+      chatMessageId: doc.data().chatMessageId || doc.data().chat_message_id,
     }));
   } catch (error) {
-    console.error("Error getting multimai messages:", error);
+    logger.err("[Conversations] Error getting multimai messages:", error);
     return [];
   }
 }
@@ -239,7 +530,7 @@ export async function getMultimaiMessages(
 export async function saveMultimaiMessage(
   phone: string,
   role: "user" | "assistant",
-  content: string,
+  content: string
 ): Promise<boolean> {
   try {
     await db.collection(multimaiMessagesCollection(phone)).add({
@@ -253,20 +544,20 @@ export async function saveMultimaiMessage(
 
     if (!conversationSnapshot.exists) {
       await conversationRef.set({
-        created_at: FieldValue.serverTimestamp(),
-        message_count: 1,
-        last_message_at: FieldValue.serverTimestamp(),
+        createdAt: FieldValue.serverTimestamp(),
+        messageCount: 1,
+        lastMessageAt: FieldValue.serverTimestamp(),
       });
     } else {
       await conversationRef.update({
-        message_count: FieldValue.increment(1),
-        last_message_at: FieldValue.serverTimestamp(),
+        messageCount: FieldValue.increment(1),
+        lastMessageAt: FieldValue.serverTimestamp(),
       });
     }
 
     return true;
   } catch (error) {
-    console.error("Error saving multimai message:", error);
+    logger.err("[Conversations] Error saving multimai message:", error);
     return false;
   }
 }
@@ -280,8 +571,7 @@ export interface ContextSummaryResult {
 }
 
 /**
- * Genera un resumen inteligente de los mensajes de contexto usando LLM
- * Retorna objeto estructurado con score, reason y resumen
+ * Generate intelligent summary of context messages using LLM
  */
 export async function generateContextSummary(
   uid: string,
@@ -291,44 +581,39 @@ export async function generateContextSummary(
   threshold: number = 0.6
 ): Promise<ContextSummaryResult> {
   try {
-    // Obtener mensajes de contexto del día
     const contextMessages = await getTodayContextMessages(uid, phone);
 
     if (contextMessages.length === 0) {
-      console.log("[generateContextSummary] No context messages found");
+      logger.info("[generateContextSummary] No context messages found");
       return {
         shouldApply: false,
         relevanceScore: 0,
         reason: "No hay mensajes de contexto disponibles",
         summary: null,
-        toolsExecuted: []
+        toolsExecuted: [],
       };
     }
 
-    console.log(`[generateContextSummary] Analyzing ${contextMessages.length} context messages`);
+    logger.info(`[generateContextSummary] Analyzing ${contextMessages.length} context messages`);
 
-    // Preparar el historial de conversación (últimos 10 mensajes)
     const recentHistory = conversationHistory
       .slice(-10)
       .map((msg) => `${msg.role}: ${msg.content}`)
       .join("\n");
 
-    // Preparar mensajes de contexto
-    const contextText = contextMessages
-      .map((msg) => msg.content)
-      .join("\n");
+    const contextText = contextMessages.map((msg) => msg.content).join("\n");
 
-    // Extraer nombres de herramientas ejecutadas
-    const toolsExecuted = Array.from(new Set(
-      contextMessages
-        .map(msg => {
-          const match = msg.content.match(/tool executed: (\w+)/);
-          return match ? match[1] : null;
-        })
-        .filter(Boolean)
-    )) as string[];
+    const toolsExecuted = Array.from(
+      new Set(
+        contextMessages
+          .map((msg) => {
+            const match = msg.content.match(/tool executed: (\w+)/);
+            return match ? match[1] : null;
+          })
+          .filter(Boolean)
+      )
+    ) as string[];
 
-    // Prompt para el LLM
     const prompt = `<task>
 Eres un asistente que analiza logs de ejecución de herramientas y evalúa su relevancia para la conversación actual.
 
@@ -382,30 +667,20 @@ Responde ÚNICAMENTE en formato JSON (sin markdown ni bloques de código):
   "reason": "[explicación breve de por qué este score de relevancia]",
   "summary": "[resumen conciso si score >= ${threshold}, o null si score < ${threshold}]"
 }
-
-Ejemplos:
-- Pregunta nueva sin relación con logs previos:
-  {"relevance_score": 0.2, "reason": "los logs son de búsquedas anteriores sin relación con la pregunta actual", "summary": null}
-
-- Pregunta relacionada con búsqueda previa:
-  {"relevance_score": 0.9, "reason": "búsqueda previa de departamentos en Palermo es directamente relevante", "summary": "Búsqueda anterior (searchId: abc123): se encontraron 5 departamentos en Palermo. Propiedades consultadas: property_id 001 (2 amb, $120k), property_id 002 (3 amb, $180k). No se programaron visitas aún."}
-
-- Pregunta sobre visita ya agendada:
-  {"relevance_score": 0.95, "reason": "existe una visita programada para la propiedad mencionada", "summary": "Visita programada (visit_id: xyz789) para property_id 001 (departamento 2 amb en Palermo) el viernes 15/11 a las 14:00. Cliente ya confirmó asistencia."}
-
-- Pregunta sobre disponibilidad consultada previamente:
-  {"relevance_score": 0.85, "reason": "se consultó disponibilidad de visitas hace minutos", "summary": "Disponibilidad consultada para property_id 003. Visitas disponibles: sábado 16/11 a las 10:00, 15:00 y 17:00. Cliente aún no agendó."}
-
-- Búsqueda sin resultados previa:
-  {"relevance_score": 0.7, "reason": "búsqueda previa no encontró resultados pero es relevante", "summary": "Búsqueda anterior de casas en Villa Crespo con 3 dormitorios y presupuesto $250k no encontró resultados. Podría necesitar ampliar criterios."}
 </formato_salida>
 </task>`;
 
-    // Define Zod schema for structured output
     const contextSummarySchema = z.object({
-      relevance_score: z.number().min(0).max(1).describe('Número entre 0.0 y 1.0 indicando relevancia del contexto'),
-      reason: z.string().describe('Explicación breve de por qué este score de relevancia'),
-      summary: z.string().nullable().describe('Resumen conciso si score >= threshold, o null si score < threshold')
+      relevance_score: z
+        .number()
+        .min(0)
+        .max(1)
+        .describe("Número entre 0.0 y 1.0 indicando relevancia del contexto"),
+      reason: z.string().describe("Explicación breve de por qué este score de relevancia"),
+      summary: z
+        .string()
+        .nullable()
+        .describe("Resumen conciso si score >= threshold, o null si score < threshold"),
     });
 
     const model = getModel(AI_CONFIG?.CONTEXT_SUMMARY_MODEL ?? "openai/gpt-4o-mini");
@@ -419,29 +694,26 @@ Ejemplos:
     const contextSummaryResult: ContextSummaryResult = {
       shouldApply: result.relevance_score >= threshold,
       relevanceScore: result.relevance_score || 0,
-      reason: result.reason || 'No reason provided',
+      reason: result.reason || "No reason provided",
       summary: result.relevance_score >= threshold ? result.summary : null,
-      toolsExecuted: toolsExecuted
+      toolsExecuted: toolsExecuted,
     };
 
-    console.log(`[generateContextSummary] Relevance score: ${contextSummaryResult.relevanceScore.toFixed(2)} (threshold: ${threshold})`);
-    console.log(`[generateContextSummary] Reason: ${contextSummaryResult.reason}`);
-    console.log(`[generateContextSummary] Should apply: ${contextSummaryResult.shouldApply}`);
-    console.log(`[generateContextSummary] Tools executed: ${toolsExecuted.join(', ')}`);
-
-    if (contextSummaryResult.shouldApply && contextSummaryResult.summary) {
-      console.log(`[generateContextSummary] Summary: ${contextSummaryResult.summary}`);
-    }
+    logger.info(
+      `[generateContextSummary] Relevance score: ${contextSummaryResult.relevanceScore.toFixed(2)} (threshold: ${threshold})`
+    );
+    logger.info(`[generateContextSummary] Reason: ${contextSummaryResult.reason}`);
+    logger.info(`[generateContextSummary] Should apply: ${contextSummaryResult.shouldApply}`);
 
     return contextSummaryResult;
   } catch (error) {
-    console.error("[generateContextSummary] Error generating context summary:", error);
+    logger.err("[generateContextSummary] Error generating context summary:", error);
     return {
       shouldApply: false,
       relevanceScore: 0,
-      reason: 'Error processing context',
+      reason: "Error processing context",
       summary: null,
-      toolsExecuted: []
+      toolsExecuted: [],
     };
   }
 }
