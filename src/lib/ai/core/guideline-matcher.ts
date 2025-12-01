@@ -2,7 +2,7 @@ import { generateObject, generateText } from 'ai';
 import { groq } from '@ai-sdk/groq';
 import { z } from 'zod';
 import type { Guideline, GuidelineMatch } from '../types/guideline';
-import type { ConversationContext } from '../types/context';
+import type { LLMMessage } from '../context/conversation-loader';
 import { AI_CONFIG } from '../config';
 import { getModel, getOpenRouterModel } from '../openrouter';
 
@@ -33,19 +33,19 @@ export class GuidelineMatcher {
 
   // Main semantic matching using LLM (optimized with batching)
   async matchGuidelines(
-    context: ConversationContext,
+    messages: LLMMessage[],
     threshold: number = 0.7,
     batchSize: number = 5
   ): Promise<GuidelineMatch[]> {
-    // Check cache
-    const cacheKey = this.getCacheKey(context);
-    if (this.cache.has(cacheKey)) {
-      console.log('[GuidelineMatcher] Cache hit for:', cacheKey);
-      return this.cache.get(cacheKey)!;
-    }
+    // // Check cache
+    // const cacheKey = this.getCacheKey(messages);
+    // if (this.cache.has(cacheKey)) {
+    //   console.log('[GuidelineMatcher] Cache hit for:', cacheKey);
+    //   return this.cache.get(cacheKey)!;
+    // }
 
     // Build conversational context
-    const conversationSummary = this.summarizeConversation(context);
+    const conversationSummary = this.summarizeConversation(messages);
 
     console.log(`[GuidelineMatcher] Evaluating ${this.guidelines.length} guidelines in batches of ${batchSize}...`);
 
@@ -55,7 +55,7 @@ export class GuidelineMatcher {
 
     // Evaluate each batch in parallel
     const batchPromises = batches.map((batch, index) =>
-      this.evaluateBatch(batch, conversationSummary, context, index)
+      this.evaluateBatch(batch, conversationSummary, messages, index)
     );
 
     const batchResults = await Promise.all(batchPromises);
@@ -74,13 +74,8 @@ export class GuidelineMatcher {
         return b.score - a.score;
       });
 
-    console.log(`[GuidelineMatcher] Matched ${matches.length} guidelines above threshold ${threshold}`);
-    matches.forEach(m => {
-      console.log(`  - ${m.guideline.id} (priority: ${m.guideline.priority}, score: ${m.score.toFixed(2)}): ${m.reason}`);
-    });
-
     // Cache result
-    this.cache.set(cacheKey, matches);
+    // this.cache.set(cacheKey, matches);
 
     return matches;
   }
@@ -98,7 +93,7 @@ export class GuidelineMatcher {
   private buildEvaluationPrompt(
     batch: Guideline[],
     conversationSummary: string,
-    context: ConversationContext
+    messages: LLMMessage[]
   ): string {
     let xml = `<evaluation_prompt>\n\n`;
 
@@ -141,7 +136,7 @@ export class GuidelineMatcher {
     // =============================
     // LAST MESSAGE
     // =============================
-    const lastMessage = context.messages[context.messages.length - 1]?.content || 'N/A';
+    const lastMessage = messages[messages.length - 1]?.content || 'N/A';
     xml += `  <ultimo_mensaje>\n`;
     xml += `    <contenido>${lastMessage}</contenido>\n`;
     xml += `  </ultimo_mensaje>\n\n`;
@@ -149,17 +144,6 @@ export class GuidelineMatcher {
     // =============================
     // TOOL RESULTS (if any)
     // =============================
-    if (context.toolResults && context.toolResults.length > 0) {
-      xml += `  <resultados_tools>\n`;
-      xml += `    <descripcion>Resultados recientes de herramientas ejecutadas</descripcion>\n\n`;
-      context.toolResults.forEach((tr, idx) => {
-        xml += `    <tool_result indice="${idx + 1}">\n`;
-        xml += `      <tool_name>${tr.toolName}</tool_name>\n`;
-        xml += `      <resultado>\n${JSON.stringify(tr.result, null, 2)}\n</resultado>\n`;
-        xml += `    </tool_result>\n\n`;
-      });
-      xml += `  </resultados_tools>\n\n`;
-    }
 
     // =============================
     // EVALUATION INSTRUCTIONS
@@ -195,16 +179,13 @@ export class GuidelineMatcher {
   private async evaluateBatch(
     batch: Guideline[],
     conversationSummary: string,
-    context: ConversationContext,
+    messages: LLMMessage[],
     batchIndex: number
   ): Promise<GuidelineMatch[]> {
     try {
       console.log(`[GuidelineMatcher] Evaluating batch ${batchIndex + 1} with ${batch.length} guidelines`);
-
       // Build evaluation prompt in XML format
-      const evaluationPrompt = this.buildEvaluationPrompt(batch, conversationSummary, context);
-
-      console.log("🤖 conversationSummary", conversationSummary);
+      const evaluationPrompt = this.buildEvaluationPrompt(batch, conversationSummary, messages);
 
       const { object } = await generateObject({
         model: this.model,
@@ -240,7 +221,7 @@ export class GuidelineMatcher {
       
       // Fallback: evaluate individually if batch fails
       const evaluationPromises = batch.map(guideline =>
-        this.evaluateGuideline(guideline, conversationSummary, context)
+        this.evaluateGuideline(guideline, conversationSummary, messages)
       );
       return await Promise.all(evaluationPromises);
     }
@@ -250,7 +231,7 @@ export class GuidelineMatcher {
   private buildSingleGuidelinePrompt(
     guideline: Guideline,
     conversationSummary: string,
-    context: ConversationContext
+    messages: LLMMessage[]
   ): string {
     let xml = `<guideline_evaluation>\n\n`;
 
@@ -273,22 +254,13 @@ export class GuidelineMatcher {
     xml += `    <historial_reciente>\n${conversationSummary}\n</historial_reciente>\n`;
     xml += `  </contexto_conversacional>\n\n`;
 
-    const lastMessage = context.messages[context.messages.length - 1]?.content || 'N/A';
+    const lastMessage = messages[messages.length - 1]?.content || 'N/A';
     xml += `  <ultimo_mensaje>\n`;
     xml += `    <contenido>${lastMessage}</contenido>\n`;
     xml += `  </ultimo_mensaje>\n\n`;
 
     // TOOL RESULTS
-    if (context.toolResults && context.toolResults.length > 0) {
-      xml += `  <resultados_tools>\n`;
-      context.toolResults.forEach((tr, idx) => {
-        xml += `    <tool_result indice="${idx + 1}">\n`;
-        xml += `      <tool_name>${tr.toolName}</tool_name>\n`;
-        xml += `      <resultado>\n${JSON.stringify(tr.result, null, 2)}\n</resultado>\n`;
-        xml += `    </tool_result>\n`;
-      });
-      xml += `  </resultados_tools>\n\n`;
-    }
+
 
     // INSTRUCTIONS
     xml += `  <instrucciones>\n`;
@@ -306,11 +278,11 @@ export class GuidelineMatcher {
   private async evaluateGuideline(
     guideline: Guideline,
     conversationSummary: string,
-    context: ConversationContext
+    messages: LLMMessage[]
   ): Promise<GuidelineMatch> {
     try {
       // Build prompt in XML format
-      const evaluationPrompt = this.buildSingleGuidelinePrompt(guideline, conversationSummary, context);
+      const evaluationPrompt = this.buildSingleGuidelinePrompt(guideline, conversationSummary, messages);
 
       // Try with generateObject first (works best with capable models)
       const { object } = await generateObject({
@@ -334,7 +306,7 @@ export class GuidelineMatcher {
       console.warn(`[GuidelineMatcher] generateObject failed for ${guideline.id}, trying text fallback:`, error instanceof Error ? error.message : error);
       
       // Fallback: Use generateText and parse JSON manually
-      return await this.evaluateGuidelineWithTextFallback(guideline, conversationSummary, context);
+    return await this.evaluateGuidelineWithTextFallback(guideline, conversationSummary, messages);
     }
   }
 
@@ -342,11 +314,11 @@ export class GuidelineMatcher {
   private async evaluateGuidelineWithTextFallback(
     guideline: Guideline,
     conversationSummary: string,
-    context: ConversationContext
+    messages: LLMMessage[]
   ): Promise<GuidelineMatch> {
     try {
       // Build XML prompt
-      const evaluationPrompt = this.buildSingleGuidelinePrompt(guideline, conversationSummary, context);
+      const evaluationPrompt = this.buildSingleGuidelinePrompt(guideline, conversationSummary, messages);
 
       // Add JSON output instructions
       const promptWithJson = `${evaluationPrompt}
@@ -404,8 +376,8 @@ export class GuidelineMatcher {
   }
 
   // Quick filtering based on rules (optional, for pre-filtering)
-  quickFilterByRules(context: ConversationContext): Guideline[] {
-    const lastMessage = context.messages[context.messages.length - 1]?.content || '';
+  quickFilterByRules(messages: LLMMessage[]): Guideline[] {
+    const lastMessage = messages[messages.length - 1]?.content || '';
     
     return this.guidelines.filter(guideline => {
       // Simple filters based on keywords
@@ -422,48 +394,26 @@ export class GuidelineMatcher {
 
   // Hybrid matching: pre-filtering + semantic evaluation
   async hybridMatch(
-    context: ConversationContext,
+    messages: LLMMessage[],
     threshold: number = 0.7,
     batchSize: number = 5
   ): Promise<GuidelineMatch[]> {
     // Step 1: Fast pre-filtering
-    const candidates = this.quickFilterByRules(context);
+    const candidates = this.quickFilterByRules(messages);
     
     if (candidates.length === 0) return [];
 
     // Step 2: Semantic evaluation only of candidates (with batching)
     const tempMatcher = new GuidelineMatcher(candidates);
-    return await tempMatcher.matchGuidelines(context, threshold, batchSize);
-  }
-
-  // Re-evaluation after tool execution
-  async reevaluateAfterTools(
-    context: ConversationContext,
-    toolResults: Array<{ toolName: string; result: any }>
-  ): Promise<GuidelineMatch[]> {
-    console.log('[GuidelineMatcher] Re-evaluating guidelines after tool execution...');
-    
-    // Add results to context
-    const enrichedContext: ConversationContext = {
-      ...context,
-      toolResults
-    };
-
-    // Re-evaluate with new context
-    return await this.matchGuidelines(enrichedContext);
+    return await tempMatcher.matchGuidelines(messages, threshold, batchSize);
   }
 
   // Utilities
-  private summarizeConversation(context: ConversationContext): string {
-    const recent = context.messages.slice(-5); // Last 5 messages
+  private summarizeConversation(messages: LLMMessage[]): string {
+    const recent = messages.slice(-5); // Last 5 messages
     return recent
       .map(m => `${m.role}: ${m.content}`)
       .join('\n');
-  }
-
-  private getCacheKey(context: ConversationContext): string {
-    const lastMessage = context.messages[context.messages.length - 1]?.content || '';
-    return `${context.sessionId}-${lastMessage.slice(0, 50)}`;
   }
 }
 

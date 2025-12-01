@@ -24,7 +24,6 @@ export class ToolOrchestrator {
   // Register tool
   registerTool(toolDef: ToolDefinition): void {
     this.tools.set(toolDef.name, toolDef);
-    console.log(`[ToolOrchestrator] Registered tool: ${toolDef.name}`);
   }
 
   // Register tool from ai-sdk tool format
@@ -120,6 +119,85 @@ export class ToolOrchestrator {
   // Get registered tool names
   getRegisteredTools(): string[] {
     return Array.from(this.tools.keys());
+  }
+
+  /**
+   * Get tool schemas for validation
+   * Returns a map of tool names to their parameter descriptions
+   */
+  getToolSchemas(toolNames?: string[]): Record<string, { description: string; parameters: string }> {
+    const schemas: Record<string, { description: string; parameters: string }> = {};
+    
+    const toolsToProcess = toolNames 
+      ? toolNames.filter(name => this.tools.has(name))
+      : Array.from(this.tools.keys());
+
+    for (const toolName of toolsToProcess) {
+      const toolDef = this.tools.get(toolName);
+      if (!toolDef) continue;
+
+      try {
+        // Extract schema from the ai-sdk tool
+        const aiTool = toolDef.tool as any;
+        let parametersDescription = '';
+
+        // Try to get the schema - ai-sdk tools have 'parameters' property
+        if (aiTool.parameters) {
+          // Convert zod schema to JSON schema for description
+          const zodSchema = aiTool.parameters;
+          if (zodSchema._def && zodSchema._def.shape) {
+            // It's a zod object schema
+            const shape = zodSchema._def.shape();
+            const params: string[] = [];
+            
+            for (const [key, value] of Object.entries(shape)) {
+              const zodField = value as any;
+              const isOptional = zodField.isOptional?.() || zodField._def?.typeName === 'ZodOptional';
+              const description = zodField._def?.description || zodField.description || '';
+              const typeName = this.getZodTypeName(zodField);
+              
+              params.push(`  - ${key}${isOptional ? ' (opcional)' : ''}: ${typeName}${description ? ` - ${description}` : ''}`);
+            }
+            
+            parametersDescription = params.join('\n');
+          }
+        }
+
+        schemas[toolName] = {
+          description: toolDef.description,
+          parameters: parametersDescription || 'Sin parámetros definidos'
+        };
+      } catch (error) {
+        console.warn(`[ToolOrchestrator] Error extracting schema for ${toolName}:`, error);
+        schemas[toolName] = {
+          description: toolDef.description,
+          parameters: 'Error al extraer parámetros'
+        };
+      }
+    }
+
+    return schemas;
+  }
+
+  /**
+   * Helper to get a readable type name from a zod schema
+   */
+  private getZodTypeName(zodField: any): string {
+    const def = zodField._def || zodField;
+    const typeName = def?.typeName || '';
+    
+    switch (typeName) {
+      case 'ZodString': return 'string';
+      case 'ZodNumber': return 'number';
+      case 'ZodBoolean': return 'boolean';
+      case 'ZodArray': return 'array';
+      case 'ZodObject': return 'object';
+      case 'ZodOptional': 
+        return this.getZodTypeName(def.innerType);
+      case 'ZodNullable':
+        return this.getZodTypeName(def.innerType);
+      default: return 'any';
+    }
   }
 }
 

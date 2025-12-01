@@ -6,7 +6,7 @@
 
 import { groq } from '@ai-sdk/groq';
 import { openai } from '@ai-sdk/openai';
-import { createOpenRouter } from '@openrouter/ai-sdk-provider';
+import { createOpenRouter, OpenRouterCompletionSettings } from '@openrouter/ai-sdk-provider';
 
 // Create OpenRouter instance
 export const openrouter = createOpenRouter({
@@ -18,14 +18,14 @@ export const openrouter = createOpenRouter({
  * @param modelName - The model name (e.g., 'openai/gpt-4-turbo', 'anthropic/claude-3-opus')
  * @returns OpenRouter model instance
  */
-export function getOpenRouterModel(modelName: string) {
-  return openrouter(modelName, { reasoning: {enabled: true, effort: 'low'} });
+export function getOpenRouterModel(modelName: string, openRouterCompletionSettings?: OpenRouterCompletionSettings) {
+  return openrouter(modelName, openRouterCompletionSettings);
 }
 
-export function getModel(modelName: string) {
+export function getModel(modelName: string, openRouterCompletionSettings?: OpenRouterCompletionSettings) {
   return typeof modelName === 'string' && modelName.startsWith('groq/')
     ? groq(modelName.replace('groq/', ''))
     : modelName.startsWith('gpt')
       ? openai(modelName)
-      : getOpenRouterModel(modelName);
+      : getOpenRouterModel(modelName, openRouterCompletionSettings);
 }

@@ -115,8 +115,6 @@ export async function saveConversationMessage(
   executionId?: string
 ): Promise<void> {
 
-  console.log('saveConversationMessage', { uid, phone, role, content, messageId, isContext, customerName, executionId });
-  // Get or create active conversation
   const { conversationId, isNew } = await getOrCreateActiveConversation(uid, phone, customerName);
 
   logger.info(`[Conversations] Saving ${role} message to conversation ${conversationId} (isContext: ${isContext || false}, executionId: ${executionId || 'none'})`);
@@ -142,7 +140,7 @@ export async function saveConversationMessage(
   }
 
   const messagesCollection = db.collection(getMessagesCollection(uid, phone, conversationId));
-  console.log('messagesCollection', messagesCollection);
+  // console.log('messagesCollection', messagesCollection);
 
   // Use messageId as document ID when available to prevent duplicates
   if (messageId) {

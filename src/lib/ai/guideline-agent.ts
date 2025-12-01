@@ -32,7 +32,7 @@ export interface GuidelineAgentOptions {
 
 export class GuidelineAgent {
   private glossary: GlossaryStore;
-  private matcher: GuidelineMatcher;
+  public matcher: GuidelineMatcher;
   private orchestrator: ToolOrchestrator;
   private composer: MessageComposer;
   private options: GuidelineAgentOptions;
@@ -79,7 +79,6 @@ export class GuidelineAgent {
     description?: string
   ): void {
     this.contextVariables.set(name, { name, value, description });
-    console.log(`[GuidelineAgent] Registered context variable: ${name}`);
   }
 
   // Resolve context variables (evaluate functions)
@@ -102,6 +101,14 @@ export class GuidelineAgent {
     }
 
     return resolved;
+  }
+
+  /**
+   * Get resolved context variables (public method for external use)
+   * Used by CascadeOrchestrator to pass variables to workers
+   */
+  async getResolvedContextVariables(): Promise<Record<string, string>> {
+    return this.resolveContextVariables();
   }
 
   public async checkGlossary(message: string, guidelines: GuidelineMatch[]): Promise<GlossaryTerm[]> {
@@ -378,6 +385,14 @@ export class GuidelineAgent {
   // Get execution log
   getExecutionLog() {
     return this.orchestrator.getExecutionLog();
+  }
+
+  /**
+   * Get tool schemas for specific tools
+   * Used by validators to know tool parameter formats
+   */
+  getToolSchemas(toolNames?: string[]): Record<string, { description: string; parameters: string }> {
+    return this.orchestrator.getToolSchemas(toolNames);
   }
 }
 

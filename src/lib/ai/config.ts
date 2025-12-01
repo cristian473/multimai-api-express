@@ -59,6 +59,30 @@ export const AI_CONFIG = {
   MICRO_AGENT_EVALUATION_THRESHOLD: 7.0, // Minimum score to accept micro-agent response
   MICRO_AGENT_TIMEOUT_MS: 30000,      // Timeout for micro-agent execution (30 seconds)
 
+  // Cascade Architecture Configuration
+  CASCADE: {
+    ENABLED: true,                           // Enable cascade workflow
+    PLANNER_MODEL: 'x-ai/grok-4.1-fast:free',     // LLM for action planning
+    WRITER_MODEL: 'x-ai/grok-4-fast',           // LLM for response composition
+    VALIDATOR_MODEL: 'gpt-4o-mini',   // LLM for style validation
+    CLASSIFIER_MODEL: 'groq/openai/gpt-oss-120b',           // LLM for message classification
+    CONTEXT_SEARCH_MODEL: 'x-ai/grok-4-fast',           // LLM for context search
+    REASONING_MODEL: 'x-ai/grok-4.1-fast:free',           // LLM for reasoning
+    STYLE_VALIDATOR_MODEL: 'x-ai/grok-4.1-fast:free',  
+    WORKER_MODELS: {
+      SEARCH_WORKER_MODEL: 'groq/meta-llama/llama-4-scout-17b-16e-instruct',
+      VISIT_WORKER_MODEL: 'groq/openai/gpt-oss-20b',
+      SUPPORT_WORKER_MODEL: 'groq/openai/gpt-oss-20b',
+      FEEDBACK_WORKER_MODEL: 'groq/meta-llama/llama-4-scout-17b-16e-instruct',
+    },         // LLM for style validation
+    MAX_WORKER_RETRIES: 2,                   // Max retries per worker
+    MAX_WRITER_RETRIES: 2,                   // Max retries for writer
+    WORKER_TIMEOUT_MS: 30000,                // Worker execution timeout
+    VALIDATION_THRESHOLD: 7.0,               // Min score for validation pass
+    ENABLE_PARALLEL_WORKERS: true,           // Execute workers in parallel
+    ENABLE_STYLE_VALIDATION: true,           // Final style validation
+  },
+
   // Auto-Development Configuration
   AUTO_DEV: {
     // Premium models for auto-development workflows

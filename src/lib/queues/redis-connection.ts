@@ -47,3 +47,4 @@ export async function closeQueueConnection(): Promise<void> {
   }
 }
 
+

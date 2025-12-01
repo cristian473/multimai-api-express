@@ -185,8 +185,6 @@ export async function loadConversationForLLM(
     finalMessages = [...systemContext, ...limitedOther];
   }
 
-  console.log('finalMessages', JSON.stringify(finalMessages, null, 2));
-
   return {
     messages: finalMessages,
     hasActiveConversation,

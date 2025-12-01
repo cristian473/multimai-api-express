@@ -1,6 +1,10 @@
 /**
- * Main Guidelines Workflow
- * Simplified and modular version
+ * Main Guidelines Cascade Workflow
+ * 
+ * Implements a cascaded architecture with distributed validation:
+ * User → Classifier → Planner → [Workers in parallel] → Writer → Style Validator → User
+ * 
+ * Each worker has its own validator using guideline-based validation criteria.
  */
 
 import { ChatConfig } from "../../utils/validation";
@@ -25,7 +29,6 @@ import {
 } from "../tools";
 import { AI_CONFIG } from "../config";
 import { quickResponser } from "../agents/quickResponser";
-import { ChainOfThoughtAgent } from '../micro-agents/chain-of-thought-agent';
 import {
   validateWorkflowInput,
   ensureCustomer,
@@ -40,6 +43,11 @@ import { generateDynamicGuidelines, mergeGuidelines } from '../guidelines/dynami
 import { ContextSearchAgent, type ContextSearchResult } from '../micro-agents/context-search-agent';
 import { AgentConfigData, AgentBusinessData } from "../../db/types";
 import { ExecutionContext, createNoOpExecutionContext, IExecutionContext } from '../../utils/execution-context';
+
+// Cascade Architecture Imports
+import { CascadeOrchestrator } from '../cascade/orchestrator';
+import type { WorkerExecutionContext } from '../cascade/types';
+import { loadConversationForLLM } from "../context";
 
 export interface WorkflowResult {
   message: string;
@@ -280,10 +288,7 @@ export async function mainGuidelinesWorkflow(
   }
 
   // ========== STEP 5: Get Conversation Context ==========
-  const { context: conversationContext, history } = await getConversationContext(uid, userPhone, session);
-
-  console.log(`[Workflow] Conversation context: ${JSON.stringify(conversationContext, null, 2)}`);
-  console.log(`[Workflow] Conversation history: ${JSON.stringify(history, null, 2)}`);
+  const conversationContext = await loadConversationForLLM(uid, userPhone);
 
   // ========== STEP 6: Quick Response (if not from activate agent) ==========
   if (!workflowContext.isFromActivateAgent) {
@@ -327,22 +332,13 @@ export async function mainGuidelinesWorkflow(
   // Update agent with merged guidelines
   (agent as any).guidelines = allGuidelines;
 
-  // ========== STEP 11: Get Execution Context Summary ==========
-  const executionContextSummary = await getExecutionContextSummary(
-    uid,
-    userPhone,
-    messageToProcess,
-    history,
-    0.6 // threshold
-  );
-
   // ========== STEP 12: Match Guidelines (with dynamic ones) ==========
-  const matcher = (agent as any).matcher;
+  const matcher = agent.matcher;
   // Update matcher guidelines too
   (matcher as any).guidelines = allGuidelines;
   
   const activeGuidelines = await matcher.matchGuidelines(
-    conversationContext,
+    conversationContext.messages,
     AI_CONFIG?.GUIDELINE_THRESHOLD ?? 0.7
   );
 
@@ -390,54 +386,58 @@ export async function mainGuidelinesWorkflow(
 
   // Check if aborted before expensive reasoning
   if (execCtx.isAborted()) {
-    console.log("[Workflow] ⚠️ Execution aborted before chain of thought");
+    console.log("[Workflow] ⚠️ Execution aborted before cascade processing");
     return null;
   }
 
-  // ========== STEP 15: Chain of Thought Reasoning ==========
-  console.log('[Workflow] Generating chain of thought reasoning...');
-  const availableTools = agent.getRegisteredTools();
+  let result: { response: string; metadata?: any; executionTrace?: any[] };
 
-  const cotAgent = new ChainOfThoughtAgent(
-    allGuidelines, // Use merged guidelines
-    agent,
-    executionContextSummary,
-    availableTools,
-    null, // microAgentsResults - removed
-    activeGuidelines,
-    glossaryContext,
-    executionContextSummary,
-    ragContext // Pass RAG context
-  );
-
-  const cotResult = await cotAgent.execute({
-    userMessage: messageToProcess,
-    conversationContext,
-    activeGuidelines,
+  console.log('[Workflow] 🚀 Starting CASCADE architecture processing...');
+  
+  // Create the Cascade Orchestrator
+  const cascadeOrchestrator = new CascadeOrchestrator({
+    guidelineAgent: agent,
     uid,
     userPhone,
-    userName
+    userName,
+    maxWorkerRetries: AI_CONFIG?.CASCADE?.MAX_WORKER_RETRIES ?? 2,
+    maxWriterRetries: AI_CONFIG?.CASCADE?.MAX_WRITER_RETRIES ?? 2,
+    workerTimeout: AI_CONFIG?.CASCADE?.WORKER_TIMEOUT_MS ?? 30000,
+    parallelExecution: AI_CONFIG?.CASCADE?.ENABLE_PARALLEL_WORKERS ?? true,
+    styleValidationEnabled: AI_CONFIG?.CASCADE?.ENABLE_STYLE_VALIDATION ?? true
   });
 
-  const chainOfThought = cotResult.success ? cotResult.response : null;
-
-  if (chainOfThought) {
-    console.log('[Workflow] Chain of thought generated');
-  } else {
-    console.log('[Workflow] Chain of thought generation failed');
-  }
-
-  // ========== STEP 16: Process with Main Agent ==========
-  const result = await agent.process(
+  // Execute the cascade workflow
+  const cascadeResult = await cascadeOrchestrator.execute(
     messageToProcess,
-    conversationContext,
-    3, // maxSteps
+    conversationContext.messages,
     activeGuidelines,
-    null, // microAgentsContext - removed
-    chainOfThought,
-    ragContext // Pass RAG context for composer
+    glossaryContext,
+    ragContext
   );
 
+  result = {
+    response: cascadeResult.response,
+    metadata: {
+      selectedGuidelines: cascadeResult.metadata?.executedGuidelines || [],
+      executedAgents: cascadeResult.metadata?.workerResults?.length || 0,
+      plannerReasoning: cascadeResult.metadata?.plan?.reasoning,
+      classification: cascadeResult.metadata?.classification?.classification,
+      writerIterations: cascadeResult.metadata?.writerIterations,
+      workerResults: cascadeResult.metadata?.workerResults?.map(r => ({
+        id: r.workerId,
+        status: r.status,
+        score: r.validation?.score
+      }))
+    },
+    executionTrace: [] // Cascade doesn't use the same trace format
+  };
+
+  console.log('[Workflow] ✅ CASCADE processing completed');
+  console.log('[Workflow] Classification:', cascadeResult.metadata?.classification?.classification);
+  console.log('[Workflow] Plan reasoning:', cascadeResult.metadata?.plan?.reasoning?.substring(0, 100) + '...');
+  console.log('[Workflow] Workers executed:', cascadeResult.metadata?.workerResults?.length || 0);
+  console.log('[Workflow] Writer iterations:', cascadeResult.metadata?.writerIterations);
   console.log('[Workflow] Response generated');
 
   // Check if aborted after main processing
@@ -446,40 +446,6 @@ export async function mainGuidelinesWorkflow(
     return null;
   }
 
-  // ========== STEP 17: Save Tool Executions as Context Messages ==========
-  const toolExecutions = result.executionTrace.filter((t: any) => t.step === 'tool_execution');
-  
-  if (toolExecutions.length > 0) {
-    console.log(`[Workflow] Saving ${toolExecutions.length} tool executions as context messages`);
-    
-    for (const execution of toolExecutions) {
-      try {
-        // Format tool execution as context message
-        const contextContent = JSON.stringify({
-          tool: execution.toolName,
-          args: execution.args,
-          result: execution.result
-        }, null, 2);
-        
-        // Save as context message (isContext: true) with system role
-        // Include executionId for potential rollback
-        await saveConversationMessage(
-          uid, 
-          userPhone, 
-          'system', // Use system role for context/tool results
-          `[Tool: ${execution.toolName}]\n${contextContent}`,
-          undefined, // No messageId
-          true, // isContext flag
-          undefined, // customerName
-          executionId // executionId for rollback
-        );
-      } catch (err) {
-        console.error(`[Workflow] Error saving tool execution ${execution.toolName}:`, err);
-      }
-    }
-  }
-
-  // ========== STEP 18: Save Assistant Response ==========
   await saveConversationMessage(
     uid, 
     userPhone, 
@@ -491,13 +457,13 @@ export async function mainGuidelinesWorkflow(
     executionId // executionId for rollback
   );
 
-  console.log("========== GUIDELINES WORKFLOW END ==========\n");
+  console.log("========== GUIDELINES CASCADE WORKFLOW END ==========\n");
 
   return {
     message: result.response,
-    metadata: {
-      selectedGuidelines: result.state.activeGuidelines.map((g: any) => g.guideline.id),
-      executedAgents: toolExecutions.length,
+    metadata: result.metadata || {
+      selectedGuidelines: activeGuidelines.map((g: any) => g.guideline.id),
+      executedAgents: 0,
     },
   };
 }

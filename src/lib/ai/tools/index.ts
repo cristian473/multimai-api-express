@@ -103,8 +103,6 @@ function formatPropertyAsText(property: any) {
     propertyText += `${extraFieldsInfo}\n`;
   }
 
-  propertyText += `@@property_id: ${property.id}@@\n`;
-
   return propertyText;
 }
 
@@ -132,9 +130,167 @@ function formatPropertySummary(property: any) {
     messageContent = summaryText;
   }
 
-  messageContent += `@@property_id: ${property.id}@@`;
-
   return messageContent;
+}
+
+/**
+ * Generate a property reference for context tracking
+ * Returns display text (without ID) and context message (with ID for system storage)
+ */
+interface PropertyReference {
+  displayText: string;
+  contextMessage: string;
+}
+
+function generatePropertyReference(property: any): PropertyReference {
+  const { 
+    id, 
+    nombre, 
+    tipo_propiedad, 
+    tipo_operacion, 
+    precio, 
+    precio_moneda,
+    ubicacion_simple,
+    ubicacion,
+    dormitorios 
+  } = property;
+
+  const operacion = tipo_operacion === "Alquiler" ? "/mes" : "";
+  const location = ubicacion_simple || ubicacion || "";
+  const rooms = dormitorios ? `${dormitorios} dorm.` : "";
+
+  // Display text without ID (shown to user)
+  const displayParts = [
+    `${tipo_propiedad} "${nombre}"`,
+    location,
+    rooms,
+    `${precio} ${precio_moneda}${operacion}`
+  ].filter(Boolean);
+  
+  const displayText = displayParts.join(" - ");
+
+  // Context message with ID (stored as system message)
+  const contextMessage = `la propiedad "${displayText}" tiene el property_id: ${id}`;
+
+  return {
+    displayText,
+    contextMessage
+  };
+}
+
+/**
+ * Save property reference as system context
+ * Stores the property ID mapping without showing it to the user
+ */
+async function savePropertyReferenceContext(
+  uid: string,
+  userPhone: string,
+  property: any,
+  executionId: string
+): Promise<PropertyReference> {
+  const reference = generatePropertyReference(property);
+  
+  await saveConversationMessage(
+    uid, 
+    userPhone, 
+    'system', 
+    reference.contextMessage, 
+    undefined, 
+    true,
+    undefined,
+    executionId
+  );
+
+  return reference;
+}
+
+/**
+ * Save multiple property references as system context
+ */
+async function savePropertiesReferenceContext(
+  uid: string,
+  userPhone: string,
+  properties: any[]
+): Promise<PropertyReference[]> {
+  const references = properties.map(generatePropertyReference);
+  
+  const contextMessages = references.map(r => r.contextMessage).join('\n\n');
+  
+  await saveConversationMessage(
+    uid, 
+    userPhone, 
+    'system', 
+    `### Propiedades referenciadas:\n\n${contextMessages}`, 
+    undefined, 
+    true
+  );
+
+  return references;
+}
+
+// Generate alternative suggestions when no properties match after reranking
+async function generateAlternativeSuggestion(
+  availableProperties: any[],
+  userQuery: string,
+  searchParams: any
+): Promise<string> {
+  try {
+    console.log('[Suggestion] Generating alternative suggestions from', availableProperties.length, 'properties');
+    
+    const model = getModel(AI_CONFIG?.REANKING_MODEL ?? 'openai/gpt-4o-mini');
+    
+    // Extract key info from available properties for analysis
+    const propertiesSummary = availableProperties.slice(0, 15).map(prop => ({
+      tipo_propiedad: prop.tipo_propiedad,
+      tipo_operacion: prop.tipo_operacion,
+      ubicacion: prop.ubicacion_simple || prop.ubicacion,
+      precio: prop.precio,
+      precio_moneda: prop.precio_moneda,
+      dormitorios: prop.dormitorios,
+    }));
+    
+    const result = await generateObject({
+      model,
+      temperature: 0.5,
+      schema: z.object({
+        suggestion: z.string().describe(
+          'A helpful suggestion in Spanish for the user based on available properties. Keep it concise (max 2-3 sentences).'
+        ),
+        alternativeLocations: z.array(z.string()).optional().describe(
+          'List of alternative locations found in available properties'
+        ),
+        priceRangeAvailable: z.string().optional().describe(
+          'Summary of price ranges available in the properties'
+        ),
+      }),
+      prompt: `You are a real estate assistant. The user searched for properties but none matched their exact criteria after relevance filtering.
+However, we have ${availableProperties.length} properties in the database that were initially found.
+
+USER SEARCH QUERY: "${userQuery}"
+
+SEARCH PARAMETERS:
+${JSON.stringify(searchParams, null, 2)}
+
+AVAILABLE PROPERTIES (summary of what we have):
+${JSON.stringify(propertiesSummary, null, 2)}
+
+TASK:
+Analyze the gap between what the user wants and what's available. Generate a helpful suggestion in Spanish that:
+1. Acknowledges we don't have exact matches
+2. Suggests alternatives based on available properties (different locations, price ranges, property types)
+3. Asks if they'd like to explore these alternatives
+
+Be conversational, helpful, and specific about what alternatives exist.
+Example format: "No encontré propiedades exactas en [location], pero tengo opciones en [alternative locations]. También hay [property types] en rangos de [price]. ¿Te interesa ver alguna de estas alternativas?"`,
+    });
+    
+    console.log('[Suggestion] Generated:', result.object.suggestion);
+    return result.object.suggestion;
+    
+  } catch (error) {
+    console.error('[Suggestion] Error generating suggestion:', error);
+    return 'No encontré propiedades que coincidan exactamente con tu búsqueda. ¿Quieres que ajuste los criterios?';
+  }
 }
 
 // Rerank properties using LLM (gpt-4o-mini) with batch processing and relevance scoring
@@ -340,7 +496,6 @@ async function executeRAGSearchInternal(
 
   if (propertiesToShow.length === 0) {
     return {
-      searchId: null,
       count: 0,
       hasMore: false,
       contextMessage: searchResult.additionalText || 'No encontré propiedades con esos criterios.',
@@ -372,11 +527,17 @@ async function executeRAGSearchInternal(
 
   // Handle case when no properties are relevant after reranking
   if (rerankedProperties.length === 0) {
+    // Generate smart suggestion based on available properties
+    const suggestion = await generateAlternativeSuggestion(
+      propertiesToShow,
+      userQuery,
+      params
+    );
+    
     return {
-      searchId: null,
       count: 0,
       hasMore: false,
-      contextMessage: 'No encontré propiedades que coincidan exactamente con tu búsqueda. ¿Quieres que ajuste los criterios?',
+      contextMessage: suggestion,
       onlyMessage: true,
       formattedProperties: '',
       resultType: 'no_relevant_after_rerank', // Used for context logging outside cache
@@ -386,19 +547,10 @@ async function executeRAGSearchInternal(
   // Format all reranked properties: return full details if only one, summaries otherwise
   const formattedSummaries = rerankedProperties.map((property) => formatPropertySummary(property)).join("\n\n");
 
-  const searchId = generateSearchId();
-
-  // Cache results in local cache too
-  searchResultsCache.set(searchId, formattedSummaries);
-
   return {
-    searchId,
-    count: rerankedProperties.length,
-    hasMore: false, // After reranking, we show only the most relevant
-    contextMessage: `Encontré ${rerankedProperties.length} ${rerankedProperties.length === 1 ? 'propiedad relevante' : 'propiedades relevantes'} para tu búsqueda.`,
-    onlyMessage: false,
+    contextMessage: message,
     formattedProperties: formattedSummaries,
-    searchType: 'hybrid_rag_with_rerank',
+    rawResults: rerankedProperties,
     resultType: 'success', // Used for context logging outside cache
   };
 }
@@ -472,25 +624,8 @@ export const searchPropertiesRAGTool = (uid: string, userPhone: string) =>
             paramsExtractor: (args) => args[2], // Extract params (third argument)
           }
         );
-
-        // Save context message OUTSIDE of cached function (always executes)
-        let contextLogMessage = '';
-        switch (result.resultType) {
-          case 'no_properties_found':
-            contextLogMessage = `tool executed: search_properties_rag - no properties found`;
-            break;
-          case 'no_relevant_after_rerank':
-            contextLogMessage = `tool executed: search_properties_rag - no relevant properties after rerank`;
-            break;
-          case 'success':
-            contextLogMessage = `tool executed: search_properties_rag - ${result.count} relevant properties found after LLM rerank`;
-            break;
-          default:
-            contextLogMessage = `tool executed: search_properties_rag - params: ${JSON.stringify(params)}`;
-        }
         
-        // Use role 'system' for context messages
-        await saveConversationMessage(uid, userPhone, 'system', contextLogMessage, undefined, true);
+        await savePropertiesReferenceContext(uid, userPhone, result.rawResults);
 
         return result.formattedProperties ?? 'No se encontraron propiedades';
       } catch (error) {
@@ -515,15 +650,11 @@ export const searchPropertiesRAGTool = (uid: string, userPhone: string) =>
           .map((property: Propiedad) => formatPropertySummary(property))
           .join("\n\n---\n\n");
 
-        const searchId = generateSearchId();
-        searchResultsCache.set(searchId, propertiesText);
+        await savePropertiesReferenceContext(uid, userPhone, propertiesToShow);
 
         return JSON.stringify({
-          searchId,
-          count: propertiesToShow.length,
           hasMore: searchResult.totalResults > propertiesToShow.length,
-          contextMessage: message,
-          onlyMessage: false,
+          message: message,
           formattedProperties: propertiesText,
           searchType: 'traditional_fallback',
         });
@@ -535,9 +666,9 @@ export const searchPropertiesRAGTool = (uid: string, userPhone: string) =>
 export const getPropertyInfoTool = (uid: string) =>
   tool({
     description:
-      "Obtiene información detallada de UNA propiedad específica. Puede buscar por ID (extraído de @@property_id: XXX@@) o por nombre de la propiedad usando búsqueda semántica RAG. Para búsquedas generales usar search_properties.",
+      "Obtiene información detallada de UNA propiedad específica. Puede buscar por ID o por nombre de la propiedad usando búsqueda semántica RAG. Para búsquedas generales usar search_properties.",
     inputSchema: z.object({
-      id: z.string().optional().describe("ID único de la propiedad (extraído del formato @@property_id: XXX@@ en el historial de conversación)"),
+      id: z.string().optional().describe("ID único de la propiedad"),
       nombre: z.string().optional().describe("Nombre de la propiedad para buscar usando búsqueda semántica (usar cuando el usuario mencione el nombre pero no se tenga el ID)"),
     }),
     execute: async ({ id, nombre }) => {
@@ -607,14 +738,9 @@ export const getPropertyInfoTool = (uid: string) =>
 
           // Format the complete property
           const propertyText = formatPropertyAsText(property);
-          const searchId = generateSearchId();
-
-          // Save to local cache as well
-          searchResultsCache.set(searchId, propertyText);
-
+          
           return {
             success: true,
-            searchId,
             property: {
               id: property.id,
               nombre: property.nombre,
@@ -1769,10 +1895,12 @@ export const rescheduleVisitTool = (
   });
 
 // Tool: log_feedback
+// Now accepts optional ExecutionContext for deferred message sending
 export const logFeedbackTool = (
   uid: string,
   userPhone: string,
   userName: string,
+  executionContext?: IExecutionContext
 ) =>
   tool({
     description:
@@ -1856,7 +1984,7 @@ export const logFeedbackTool = (
 
         console.log("[logFeedbackTool] Feedback stored with ID:", feedbackRef.id);
 
-        // Send notification to owner
+        // Prepare notification message for owner
         const reportsNumber = userConfig.config.reportsNumber;
         const multimaiSession = process.env.MULTIMAI_WS_SESSION;
 
@@ -1879,31 +2007,72 @@ export const logFeedbackTool = (
         
         messageToOwner += `\n_Feedback ID: ${feedbackRef.id}_`;
 
-        await saveConversationMessage(
-          uid,
-          userPhone,
-          "system",
-          `tool executed: log_feedback - message sent to owner: ${messageToOwner}`,
-          undefined,
-          true
-        );
+        // DEFERRED: Send message to owner - only executes if processing completes
+        // If an ExecutionContext is provided, defer the message sending
+        // This prevents duplicate messages if the execution is aborted
+        if (executionContext) {
+          console.log("[logFeedbackTool] 📤 Deferring message to owner (will send on completion)");
+          
+          // Use actionId for deduplication - if called multiple times, only last one executes
+          executionContext.addPendingAction(async () => {
+            console.log("[logFeedbackTool] 📨 Executing deferred: Sending message to owner");
+            
+            await saveConversationMessage(
+              uid,
+              userPhone,
+              "system",
+              `tool executed: log_feedback - message sent to owner: ${messageToOwner}`,
+              undefined,
+              true
+            );
 
-        await wsProxyClient.post(`/ws/send-message`, {
-          chatId: reportsNumber,
-          session: multimaiSession,
-          messages: [
-            {
-              type: "text",
-              payload: {
-                content: messageToOwner,
+            await wsProxyClient.post(`/ws/send-message`, {
+              chatId: reportsNumber,
+              session: multimaiSession,
+              messages: [
+                {
+                  type: "text",
+                  payload: {
+                    content: messageToOwner,
+                  },
+                },
+              ],
+            });
+
+            await saveMultimaiMessage(userPhone, "assistant", messageToOwner);
+            
+            console.log("[logFeedbackTool] ✅ Deferred message sent to owner. Feedback ID:", feedbackRef.id);
+          }, `log_feedback_message_${userPhone}`); // Unique actionId for deduplication
+        } else {
+          // No ExecutionContext - send immediately (backward compatibility)
+          console.log("[logFeedbackTool] 📨 Sending message to owner immediately (no context)");
+
+          await saveConversationMessage(
+            uid,
+            userPhone,
+            "system",
+            `tool executed: log_feedback - message sent to owner: ${messageToOwner}`,
+            undefined,
+            true
+          );
+
+          await wsProxyClient.post(`/ws/send-message`, {
+            chatId: reportsNumber,
+            session: multimaiSession,
+            messages: [
+              {
+                type: "text",
+                payload: {
+                  content: messageToOwner,
+                },
               },
-            },
-          ],
-        });
+            ],
+          });
 
-        await saveMultimaiMessage(userPhone, "assistant", messageToOwner);
+          await saveMultimaiMessage(userPhone, "assistant", messageToOwner);
 
-        console.log("[logFeedbackTool] ✅ Feedback registrado y enviado al dueño");
+          console.log("[logFeedbackTool] ✅ Feedback registrado y enviado al dueño");
+        }
 
         return JSON.stringify({
           success: true,

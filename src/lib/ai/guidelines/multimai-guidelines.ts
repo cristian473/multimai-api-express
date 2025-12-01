@@ -55,7 +55,7 @@ export const multimaiGuidelines: Guideline[] = [
   {
     id: 'search_properties',
     condition: 'El usuario busca propiedades con criterios específicos como ubicación, precio, tipo, dormitorios, etc. O usa verbos como "busco", "quiero", "necesito", "me interesa" seguido de tipo de propiedad (casa, departamento, terreno, etc.)',
-    action: 'Usa search_properties con TODOS los filtros que el usuario mencionó (precio, tipo, dormitorios, ubicación). Si no encuentra resultados en el primer intento, informa al usuario que no hay propiedades exactas pero puedes mostrar opciones similares. Muestra las propiedades encontradas con formato claro incluyendo el @@property_id: XXX@@ para referencia futura y SIEMPRE las imágenes en formato Markdown',
+    action: 'Usa search_properties con TODOS los filtros que el usuario mencionó (precio, tipo, dormitorios, ubicación). Si no encuentra resultados en el primer intento, informa al usuario que no hay propiedades exactas pero puedes mostrar opciones similares. Muestra las propiedades encontradas con formato claro y SIEMPRE las imágenes en formato Markdown',
     priority: 8,
     difficulty: 'medium',
     tools: ['search_properties'],
@@ -73,12 +73,12 @@ export const multimaiGuidelines: Guideline[] = [
         ]
       },
       {
-        name: 'Formato de property_id',
-        description: 'Verificar que cada propiedad mostrada incluya el identificador en formato @@property_id: XXX@@ para referencia futura',
+        name: 'No mostrar property_id',
+        description: 'No muestres el identificador (property_id) en la respuesta al usuario. El id debe usarse solo internamente y nunca debe aparecer ni en texto ni en ningún formato visible para el usuario.',
         weight: 15,
         examples: [
-          'CORRECTO: @@property_id: prop_12345@@',
-          'INCORRECTO: Omitir el property_id o usar otro formato'
+          'CORRECTO: Departamento de 2 ambientes en Palermo - $180,000 USD - 45m² - Balcón', 
+          'INCORRECTO: @@property_id: prop_12345@@'
         ]
       },
       {
@@ -95,14 +95,36 @@ export const multimaiGuidelines: Guideline[] = [
   
   {
     id: 'get_property_detail',
-    condition: 'El usuario pregunta sobre una propiedad específica ya mostrada (identificada por @@property_id: XXX@@)',
+    condition: 'El usuario pregunta sobre una propiedad específica ya mostrada, buscar el id en los mensajes de contexto de system',
     action: 'Usa get_property_info para obtener información detallada de esa propiedad específica',
     priority: 8,
     difficulty: 'medium',
     tools: ['get_property_info'],
     enabled: true,
     scope: 'global',
-    tags: ['property', 'detail']
+    tags: ['property', 'detail'],
+    validationCriteria: [
+      {
+        name: "Validación de veracidad de la información",
+        description: "La respuesta DEBE ser veraz y no inventar información",
+        weight: 60,
+        examples: [
+          'INCORRECTO: "La propiedad tiene 3 ambientes, 2 baños y 1 cocina"',
+          'CORRECTO: (luego de ver los resultados de la busqueda) "La propiedad tiene 2 ambientes, 1 baño y 1 cocina"',
+          'INCORRECTO: "- Expensas: Bajas, $20.000-$30.000/mes (mantenimiento del barrio)."',
+          'CORRECTO: (en ningun momento se menciona expensas en la información de la propiedad) [no incluir información inventada en la respuesta]',
+        ]
+      },
+      {
+        name: "No incluir información ya enviada anteriormente en la conversación",
+        description: "La respuesta DEBE NO incluir información ya enviada anteriormente en la conversación",
+        weight: 40,
+        examples: [
+          'INCORRECTO: [Repito la respuesta con fotos o información que ya se envió antes]',
+          'CORRECTO: (luego de ver el historial de conversación) [solo envío información nueva y no repetitiva]',
+        ]
+      }
+    ]
   },
   
   {
@@ -346,8 +368,8 @@ export const multimaiGuidelines: Guideline[] = [
   
   {
     id: 'get_human_help',
-    condition: 'El usuario pregunta sobre: política de mascotas, negociación de precios, condiciones especiales, requisitos de contrato, modificaciones a la propiedad, O dice explícitamente "pregunta/contacta/habla con el dueño/propietario"',
-    action: 'Ejecutar get_help INMEDIATAMENTE sin dar respuestas genéricas primero. Responder al usuario: "Te consulto al dueño sobre [tema específico] y te aviso en breve ✓". NO decir "no tengo información" sin ejecutar get_help. Temas que SIEMPRE requieren escalamiento: mascotas, negociación precio, políticas de alquiler/venta no especificadas, modificaciones, garantías especiales',
+    condition: 'El agente no puede responder la pregunta con la información disponible en el contexto, el agente no tiene conocimiento suficiente para dar una respuesta precisa, O el usuario solicita explícitamente hablar con un humano/agente/propietario/dueño',
+    action: 'Ejecutar get_help INMEDIATAMENTE. Responder al usuario: "Voy a consultar esto con el equipo y te aviso en breve ✓". NUNCA responder "no tengo esa información" o dar respuestas evasivas sin antes ejecutar get_help. El escalamiento es la acción correcta cuando la información no está disponible',
     priority: 10,
     difficulty: 'high',
     tools: ['get_help'],
@@ -511,7 +533,7 @@ export const multimaiGuidelines: Guideline[] = [
   {
     id: 'property_reference_context',
     condition: 'El usuario se refiere a una propiedad usando "la primera", "la segunda", "esa propiedad", "la del precio X" después de que se mostraron propiedades',
-    action: 'Buscar en el historial reciente las propiedades mostradas con @@property_id: XXX@@. Identificar cuál propiedad menciona el usuario basándose en el contexto (primera=primera en la lista, precio=propiedad con ese precio, etc.). Usar ese property_id para consultas subsiguientes',
+    action: 'Buscar en el historial reciente las propiedades mostradas con property_id. Identificar cuál propiedad menciona el usuario basándose en el contexto (primera=primera en la lista, precio=propiedad con ese precio, etc.). Usar ese property_id para consultas subsiguientes',
     priority: 9,
     difficulty: 'medium',
     enabled: true,

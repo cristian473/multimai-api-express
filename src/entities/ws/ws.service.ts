@@ -9,6 +9,7 @@
  */
 
 import { mainGuidelinesWorkflow } from '../../lib/ai/workflows/main-guidelines-workflow';
+import { mainGuidelinesWorkflow as mainGuidelinesWorkflowCascade } from '../../lib/ai/workflows/main-guidelines-cascade-workflow';
 import { multimaiWorkflow } from '../../lib/ai/workflows/multimai-workflow';
 import { WhatsAppWebhookPayload, ActivateAgentRequest } from './ws.dto';
 import { extractCustomerNumber, hasToReply } from '../../lib/utils/inactivate-bot';
@@ -21,6 +22,8 @@ import { withTypingIndicator } from '../../lib/utils/typing-indicator-helper';
 import { sendSeen, startTyping, stopTyping } from '../../lib/utils/whatsapp-status-helpers';
 import { shouldProcessWorkflow } from '../../lib/utils/validation';
 import { createMessageCleanupFn } from '../../lib/db/repositories/conversations';
+import { WorkflowResult } from '../../lib/ai/workflows/main-guidelines-workflow';
+import { AI_CONFIG } from '../../lib/ai/config';
 
 // Create message queue instance with centralized configuration
 const enqueueMessage = createMessageQueue({
@@ -82,12 +85,21 @@ async function processWebhookResponse(webhookPayload: WhatsAppWebhookPayload): P
 
       await startTyping(webhookPayload);
 
-      // Execute AI workflow with ExecutionContext
-      const aiResponse = await mainGuidelinesWorkflow(metadata.uid, session, {
-        userPhone,
-        messages: accumulatedMessages,
-        userName: payload.userName
-      }, undefined, executionContext);
+      let aiResponse: WorkflowResult | null = null;
+
+      if (AI_CONFIG?.CASCADE?.ENABLED) {
+        aiResponse = await mainGuidelinesWorkflowCascade(metadata.uid, session, {
+          userPhone,
+          messages: accumulatedMessages,
+          userName: payload.userName
+        }, undefined, executionContext);
+      } else {
+        aiResponse = await mainGuidelinesWorkflow(metadata.uid, session, {
+          userPhone,
+          messages: accumulatedMessages,
+          userName: payload.userName
+        }, undefined, executionContext);
+      }
 
       // Check if aborted after workflow
       if (executionContext.isAborted()) {
@@ -101,6 +113,8 @@ async function processWebhookResponse(webhookPayload: WhatsAppWebhookPayload): P
         await stopTyping(webhookPayload);
         return;
       }
+
+      console.log("[Webhook] AI response:", aiResponse.message);
 
       // Process and send response
       const responseMessages = processResponse(aiResponse.message);
@@ -224,7 +238,7 @@ async function processActivateAgent(request: ActivateAgentRequest): Promise<any>
     // Execute workflow with typing indicator
     // Note: ActivateAgent doesn't need ExecutionContext since it's not queued
     const aiResponse = await withTypingIndicator(session, chatId, async () => {
-      return await mainGuidelinesWorkflow(uid, session, {
+      return await mainGuidelinesWorkflowCascade(uid, session, {
         userPhone,
         message: "",
         userName,

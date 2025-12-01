@@ -28,7 +28,6 @@ export async function handleWebhook(req: Request, res: Response) {
 export async function handleMultimaiWebhook(req: Request, res: Response) {
   try {
     const payload: WhatsAppWebhookPayload = req.body;
-    console.log('Received Multimai webhook payload:', JSON.stringify(payload, null, 2));
 
     await wsService.processMultimaiWebhookResponse(payload);
 

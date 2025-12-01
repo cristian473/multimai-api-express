@@ -11,12 +11,9 @@ import {
   TEMPORAL_BLOCK_CONFIG
 } from './temporal-block-manager';
 import { extractPhoneFromChatId } from './message-helpers';
-import { shouldProcessWorkflow } from "./validation";
 
 export function extractCustomerNumber(webhookPayload: WhatsAppWebhookPayload): string {
   const { payload } = webhookPayload;
-  console.log('payload', payload);
-  console.log('payload._data.key', payload._data.key);
   return payload.fromMe 
       ? extractPhoneFromChatId(payload._data.key.remoteJid) 
       : extractPhoneFromChatId(payload.from);
