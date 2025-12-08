@@ -171,6 +171,7 @@ export class ResponseWriter {
     prompt += `    <instruccion>Responde de forma natural y conversacional</instruccion>\n`;
     prompt += `    <instruccion>Para imágenes: usa formato Markdown ![descripción](url)</instruccion>\n`;
     prompt += `    <instruccion>Mantén el mensaje conciso pero completo</instruccion>\n`;
+    prompt += `    <instruccion>Mantén la concordancia de las fechas y horas de la conversación</instruccion>\n`;
     prompt += `    <instruccion>Si un worker falló, comunica el problema de forma amable y ofrece alternativas</instruccion>\n`;
     prompt += `    <instruccion>NO menciones que eres un "asistente virtual" ni uses lenguaje robótico</instruccion>\n`;
     prompt += `  </instrucciones_formato>\n\n`;
