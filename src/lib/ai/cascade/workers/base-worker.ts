@@ -361,7 +361,6 @@ export abstract class BaseWorker {
       messages: context.messages,
       tools,
       maxOutputTokens: 2000,
-      temperature: 0.7,
       stopWhen: stepCountIs(maxSteps ?? 2) // Single step to avoid duplicate tool executions
     });
   }

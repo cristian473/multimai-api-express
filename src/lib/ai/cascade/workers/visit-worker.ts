@@ -7,6 +7,16 @@
 import { BaseWorker, WorkerIterationResult } from './base-worker';
 import { WORKER_REGISTRY, WorkerExecutionContext } from '../types';
 import type { GuidelineAgent } from '../../guideline-agent';
+import {
+  getAvailabilityToVisitPropertyTool,
+  createNewPropertyVisitTool,
+  addVisitorToScheduledVisitTool,
+  askForAvailabilityTool,
+  cancelVisitTool,
+  rescheduleVisitTool,
+  getVisitStatusTool,
+  getTodayDateTool,
+} from '../../tools';
 
 export class VisitWorker extends BaseWorker {
   constructor() {
@@ -54,16 +64,34 @@ export class VisitWorker extends BaseWorker {
     prompt += `</worker_prompt>`;
 
     // Get tools from guideline agent if available
-    let tools: any = undefined;
+    let guidelineTools: Record<string, any> = {};
     if (this.guidelineAgent) {
       const orchestrator = (this.guidelineAgent as any).orchestrator;
       if (orchestrator) {
         const relevantGuidelines = context.activeGuidelines.filter(g =>
           this.definition.associatedGuidelineIds.includes(g.guideline.id)
         );
-        tools = orchestrator.getToolsForGuidelines(relevantGuidelines);
+        guidelineTools = orchestrator.getToolsForGuidelines(relevantGuidelines) || {};
       }
     }
+
+    // Create visit-related tools
+    const { uid, userPhone, userName = 'Cliente' } = context;
+    const visitTools: Record<string, any> = {
+      get_availability_to_visit_the_property: getAvailabilityToVisitPropertyTool(uid, userPhone),
+      create_new_property_visit: createNewPropertyVisitTool(uid, userPhone, userName),
+      add_visitor_to_scheduled_visit: addVisitorToScheduledVisitTool(uid, userPhone, userName),
+      ask_for_availability: askForAvailabilityTool(uid, userPhone, userName),
+      cancel_visit: cancelVisitTool(uid, userPhone, userName),
+      reschedule_visit: rescheduleVisitTool(uid, userPhone, userName),
+      get_visit_status: getVisitStatusTool(uid, userPhone),
+    };
+
+    // Merge tools: guideline tools take precedence, visit tools fill in gaps
+    const tools = {
+      ...visitTools,
+      ...guidelineTools, // Guidelines override if same tool exists
+    };
 
     // Generate response
     const result = await this.generateWithModel(prompt, context, tools);

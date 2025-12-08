@@ -251,6 +251,7 @@ export class CascadeOrchestrator {
 
   /**
    * Execute workers based on the plan
+   * Returns: { results, askToUser } where askToUser contains info if we need to stop and ask user
    */
   private async executeWorkers(
     plan: ActionPlan,
@@ -284,6 +285,51 @@ export class CascadeOrchestrator {
       }
 
       task.status = 'running';
+
+      // Handle ask_to_user task type - stop execution and go to writer
+      if (task.type === 'ask_to_user') {
+        console.log(`[CascadeOrchestrator] Task ${task.id} is ask_to_user, stopping execution to ask user`);
+        
+        // Collect all previous task results as context for the writer
+        const collectedContext: string[] = [];
+        taskResults.forEach((result, id) => {
+          collectedContext.push(`[Task ${id}]: ${result}`);
+        });
+        
+        task.status = 'ask_user';
+        task.result = `[ASK_TO_USER]\nQuestion: ${task.questionForUser || task.description}\nCollected Context:\n${collectedContext.join('\n')}`;
+        taskResults.set(task.id, task.result);
+        
+        // Mark remaining tasks as skipped
+        for (const remainingTask of sortedTasks) {
+          if (remainingTask.step > task.step && remainingTask.status === 'pending') {
+            remainingTask.status = 'pending'; // Keep as pending for potential future execution
+            console.log(`[CascadeOrchestrator] Task ${remainingTask.id} skipped due to ask_to_user`);
+          }
+        }
+        
+        // Create a synthetic worker result to pass the ask_to_user info to the writer
+        results.push({
+          workerId: 'ask_to_user',
+          status: 'success',
+          response: task.result,
+          toolsExecuted: [],
+          validation: {
+            passed: true,
+            score: 10,
+            iterations: 0,
+            feedback: 'User interaction required',
+            guidelinesCriteria: []
+          },
+          metadata: {
+            executionTimeMs: 0,
+            activatedGuidelines: []
+          }
+        });
+        
+        // Break out of the loop - go directly to writer
+        break;
+      }
 
       // Handle different task types
       if (task.type === 'reasoning') {

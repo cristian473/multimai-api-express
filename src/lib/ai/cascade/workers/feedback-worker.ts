@@ -7,6 +7,7 @@
 import { BaseWorker, WorkerIterationResult } from './base-worker';
 import { WORKER_REGISTRY, WorkerExecutionContext } from '../types';
 import type { GuidelineAgent } from '../../guideline-agent';
+import { logFeedbackTool } from '../../tools';
 
 export class FeedbackWorker extends BaseWorker {
   constructor() {
@@ -53,16 +54,28 @@ export class FeedbackWorker extends BaseWorker {
     prompt += `</worker_prompt>`;
 
     // Get tools from guideline agent if available
-    let tools: any = undefined;
+    let guidelineTools: Record<string, any> = {};
     if (this.guidelineAgent) {
       const orchestrator = (this.guidelineAgent as any).orchestrator;
       if (orchestrator) {
         const relevantGuidelines = context.activeGuidelines.filter(g =>
           this.definition.associatedGuidelineIds.includes(g.guideline.id)
         );
-        tools = orchestrator.getToolsForGuidelines(relevantGuidelines);
+        guidelineTools = orchestrator.getToolsForGuidelines(relevantGuidelines) || {};
       }
     }
+
+    // Create feedback-related tools
+    const { uid, userPhone, userName = 'Cliente' } = context;
+    const feedbackTools: Record<string, any> = {
+      log_feedback: logFeedbackTool(uid, userPhone, userName),
+    };
+
+    // Merge tools: guideline tools take precedence, feedback tools fill in gaps
+    const tools = {
+      ...feedbackTools,
+      ...guidelineTools, // Guidelines override if same tool exists
+    };
 
     // Generate response
     const result = await this.generateWithModel(prompt, context, tools);

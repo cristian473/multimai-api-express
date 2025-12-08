@@ -61,12 +61,32 @@ export class ResponseWriter {
     prompt += `    <complejidad>${input.plan.estimatedComplexity}</complejidad>\n`;
     prompt += `  </plan_ejecutado>\n\n`;
 
+    // Check if there's an ask_to_user result - this has priority
+    const askToUserResult = input.workerResults.find(r => r.workerId === 'ask_to_user');
+    
+    if (askToUserResult) {
+      prompt += `  <ask_to_user>\n`;
+      prompt += `    <instruccion_prioritaria>DEBES preguntar al usuario para obtener más información antes de continuar</instruccion_prioritaria>\n`;
+      prompt += `    <contexto_recolectado>\n`;
+      prompt += `      ${askToUserResult.response}\n`;
+      prompt += `    </contexto_recolectado>\n`;
+      prompt += `    <comportamiento>\n`;
+      prompt += `      <paso>1. Usa la información recolectada para dar contexto al usuario si es relevante</paso>\n`;
+      prompt += `      <paso>2. Formula la pregunta de manera natural y amigable</paso>\n`;
+      prompt += `      <paso>3. NO ejecutes acciones - solo pregunta al usuario qué desea hacer</paso>\n`;
+      prompt += `      <paso>4. Si hay múltiples opciones, preséntalas de forma clara</paso>\n`;
+      prompt += `    </comportamiento>\n`;
+      prompt += `  </ask_to_user>\n\n`;
+    }
+    
     // Worker results - the most important part
-    if (input.workerResults.length > 0) {
+    const regularWorkerResults = input.workerResults.filter(r => r.workerId !== 'ask_to_user');
+    
+    if (regularWorkerResults.length > 0) {
       prompt += `  <resultados_workers>\n`;
       prompt += `    <nota>IMPORTANTE: Usa esta información para construir tu respuesta</nota>\n\n`;
       
-      input.workerResults.forEach(result => {
+      regularWorkerResults.forEach(result => {
         prompt += `    <worker id="${result.workerId}" status="${result.status}">\n`;
         
         if (result.status === 'success') {
@@ -101,7 +121,7 @@ export class ResponseWriter {
       });
       
       prompt += `  </resultados_workers>\n\n`;
-    } else {
+    } else if (!askToUserResult) {
       prompt += `  <sin_workers>\n`;
       prompt += `    <nota>No se ejecutaron workers, responde directamente al usuario basándote en el contexto y las guidelines</nota>\n`;
       prompt += `  </sin_workers>\n\n`;

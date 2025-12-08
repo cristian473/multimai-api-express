@@ -738,7 +738,7 @@ export const getPropertyInfoTool = (uid: string) =>
 
           // Format the complete property
           const propertyText = formatPropertyAsText(property);
-          
+
           return {
             success: true,
             property: {
@@ -1100,9 +1100,7 @@ export const getAvailabilityToVisitPropertyTool = (uid: string, userPhone: strin
               console.log("[getAvailabilityToVisitPropertyTool] No hay visitas programadas");
               return {
                 success: true,
-                visits: [],
-                message: "No hay visitas programadas, PRIMERO consultar día y hora de disponibilidad del usuario, LUEGO utilizar ask_for_availability para consultar al dueño",
-                _futureVisitsForContext: [], // For context logging outside cache
+                message: "No hay visitas programadas, PRIMERO consultar día y hora de disponibilidad del usuario, si ya los tienes, entonces utilizar ask_for_availability para consultar al dueño",
               };
             }
 
@@ -1158,17 +1156,18 @@ export const getAvailabilityToVisitPropertyTool = (uid: string, userPhone: strin
 
         // Save context message OUTSIDE of cached function (always executes)
         const visitsCount = cachedResult._futureVisitsForContext?.length ?? cachedResult.visits?.length ?? 0;
-        await saveConversationMessage(
-          uid, 
-          userPhone, 
-          'system', 
-          `tool executed: get_availability_to_visit_the_property - property: ${property_id}, future visits count: ${visitsCount}`,
-          undefined, 
-          true
-        );
+        // await saveConversationMessage(
+        //   uid, 
+        //   userPhone, 
+        //   'system', 
+        //   `tool executed: get_availability_to_visit_the_property - property: ${property_id}, future visits count: ${visitsCount}`,
+        //   undefined, 
+        //   true
+        // );
 
         // Remove internal context field before returning
         const { _futureVisitsForContext, ...resultToReturn } = cachedResult;
+        console.log("[getAvailabilityToVisitPropertyTool] Result:", resultToReturn);
         return JSON.stringify(resultToReturn);
       } catch (error) {
         console.error("Error fetching visits:", error);
@@ -2267,18 +2266,16 @@ export const getVisitStatusTool = (uid: string, userPhone: string) =>
         // Format date and time
         let formattedDate = '';
         let formattedTime = '';
-        if (visitData?.visitDateTime) {
-          const visitDate = visitData.visitDateTime.toDate ? visitData.visitDateTime.toDate() : new Date(visitData.visitDateTime);
-          formattedDate = visitDate.toLocaleDateString('es-AR', {
-            weekday: 'long',
-            day: 'numeric',
-            month: 'long',
-            year: 'numeric'
-          });
-          formattedTime = visitDate.toLocaleTimeString('es-AR', {
-            hour: '2-digit',
-            minute: '2-digit'
-          });
+        let formattedEndTime = '';
+        if (visitData?.date) {
+          // visitData.date is a Firebase Timestamp, visitData.time is a string "HH:mm"
+          const visitDate = visitData.date.toDate ? visitData.date.toDate() : new Date(visitData.date);
+          const day = String(visitDate.getDate()).padStart(2, '0');
+          const month = String(visitDate.getMonth() + 1).padStart(2, '0');
+          const year = visitDate.getFullYear();
+          formattedDate = `${day}/${month}/${year}`;
+          formattedTime = visitData.startTime || '';
+          formattedEndTime = visitData.endTime || '';
         }
 
         const visitStatus = {
@@ -2289,7 +2286,9 @@ export const getVisitStatusTool = (uid: string, userPhone: string) =>
           cancellation_reason: visitData?.cancellationReason || null,
           date: formattedDate,
           time: formattedTime,
-          raw_datetime: visitData?.visitDateTime,
+          endTime: formattedEndTime,
+          raw_date: visitData?.date,
+          raw_time: visitData?.startTime,
           notes: visitData?.notes || null,
           property: propertyInfo,
           property_id: visitData?.propertyId || null,
@@ -2307,11 +2306,11 @@ export const getVisitStatusTool = (uid: string, userPhone: string) =>
           true
         );
 
-        console.log(`[getVisitStatusTool] ✅ Visita encontrada: ${visit_id}, status: ${visitStatus.status}`);
+        console.log(`[getVisitStatusTool] ✅ Visita encontrada: ${visit_id}, status: ${visitStatus.status}, fecha: ${visitStatus.date}, hora: ${visitStatus.time}`);
 
         return JSON.stringify({
           success: true,
-          message: `Visita ${visit_id}: ${visitStatus.is_cancelled ? 'CANCELADA' : 'ACTIVA'}${visitStatus.date ? ` para el ${visitStatus.date} a las ${visitStatus.time}` : ''}`,
+          message: `La visita ${visit_id} tiene el estado "${visitStatus.status.toUpperCase()}", y tiene fecha del ${visitStatus.date} a las ${visitStatus.time} hasta las ${visitStatus.endTime}`,
         });
 
       } catch (error) {

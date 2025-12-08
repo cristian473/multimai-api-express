@@ -49,13 +49,14 @@ export interface MessageComposerResult {
 }
 
 // Zod schema for validation result
+// Note: All fields must be required for Azure/OpenAI JSON Schema compatibility
 const validationResultSchema = z.object({
   score: z.number().min(0).max(10).describe('Score between 0-10 evaluating the response quality'),
   is_valid: z.boolean().describe('Whether the score meets the minimum threshold'),
   feedback: z.string().describe('General feedback explaining the score in 2-3 sentences'),
   issues: z.array(z.string()).describe('List of specific issues found in the response'),
   suggestions: z.array(z.string()).describe('Concrete suggestions for improvement'),
-  tools_to_reexecute: z.array(z.string()).optional().describe('Names of tools that need to be executed again with different parameters')
+  tools_to_reexecute: z.array(z.string()).describe('Names of tools that need to be executed again with different parameters. Use empty array [] if no re-execution needed.')
 });
 
 export class MessageComposer {

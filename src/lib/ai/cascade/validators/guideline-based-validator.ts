@@ -12,9 +12,10 @@ import type { WorkerExecutionContext, LightweightValidationResult } from '../typ
 import type { WorkerToolResult } from '../workers/base-worker';
 
 // Schema for the lightweight validation result
+// Note: All fields must be required for Azure/OpenAI JSON Schema compatibility
 const LightweightValidationSchema = z.object({
   score: z.number().min(0).max(10).describe('Score from 0-10. 7+ means execution was correct.'),
-  feedback: z.string().optional().describe('If score < 7, describe which tool to execute and with what parameters. Example: "Ejecutar search_properties con { precio_max: 500000, dormitorios: 3 }"')
+  feedback: z.string().describe('If score < 7, describe which tool to execute and with what parameters. Example: "Ejecutar search_properties con { precio_max: 500000, dormitorios: 3 }". Use empty string if no feedback needed.')
 });
 
 export interface LightweightValidatorConfig {
@@ -133,7 +134,7 @@ export class LightweightValidator {
     const prompt = this.buildMinimalPrompt(context.userMessage, toolsExecuted, toolSchemas);
 
     // Log the prompt for debugging
-    console.log(`[LightweightValidator:${this.config.workerId}] Validation prompt:\n${prompt.substring(0, 500)}...`);
+    // console.log(`[LightweightValidator:${this.config.workerId}] Validation prompt:\n${prompt.substring(0, 500)}...`);
 
     // Quick LLM call with minimal tokens
     const result = await generateObject({
@@ -146,16 +147,18 @@ export class LightweightValidator {
 
     const { score, feedback } = result.object;
     const isValid = score >= this.config.threshold;
+    // Convert empty string to undefined for type compatibility
+    const normalizedFeedback = feedback && feedback.trim() ? feedback : undefined;
 
     console.log(`[LightweightValidator:${this.config.workerId}] Score: ${score}/10, Valid: ${isValid}`);
-    if (feedback) {
-      console.log(`[LightweightValidator:${this.config.workerId}] Feedback: ${feedback}`);
+    if (normalizedFeedback) {
+      console.log(`[LightweightValidator:${this.config.workerId}] Feedback: ${normalizedFeedback}`);
     }
 
     return {
       score,
       isValid,
-      feedback
+      feedback: normalizedFeedback
     };
   }
 

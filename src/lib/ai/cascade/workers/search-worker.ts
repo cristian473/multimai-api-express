@@ -7,6 +7,10 @@
 import { BaseWorker, WorkerIterationResult } from './base-worker';
 import { WORKER_REGISTRY, WorkerExecutionContext } from '../types';
 import type { GuidelineAgent } from '../../guideline-agent';
+import {
+  searchPropertiesRAGTool,
+  getPropertyInfoTool,
+} from '../../tools';
 
 export class SearchWorker extends BaseWorker {
   constructor() {
@@ -42,16 +46,29 @@ export class SearchWorker extends BaseWorker {
     prompt += `</worker_prompt>`;
 
     // Get tools from guideline agent if available
-    let tools: any = undefined;
+    let guidelineTools: Record<string, any> = {};
     if (this.guidelineAgent) {
       const orchestrator = (this.guidelineAgent as any).orchestrator;
       if (orchestrator) {
         const relevantGuidelines = context.activeGuidelines.filter(g =>
           this.definition.associatedGuidelineIds.includes(g.guideline.id)
         );
-        tools = orchestrator.getToolsForGuidelines(relevantGuidelines);
+        guidelineTools = orchestrator.getToolsForGuidelines(relevantGuidelines) || {};
       }
     }
+
+    // Create search-related tools
+    const { uid, userPhone } = context;
+    const searchTools: Record<string, any> = {
+      search_properties_rag: searchPropertiesRAGTool(uid, userPhone),
+      get_property_info: getPropertyInfoTool(uid),
+    };
+
+    // Merge tools: guideline tools take precedence, search tools fill in gaps
+    const tools = {
+      ...searchTools,
+      ...guidelineTools, // Guidelines override if same tool exists
+    };
 
     // Generate response
     const result = await this.generateWithModel(prompt, context, tools);

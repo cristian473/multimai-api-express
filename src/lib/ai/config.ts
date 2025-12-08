@@ -14,6 +14,7 @@ export const AI_CONFIG = {
   EMBEDDING_MODEL: 'text-embedding-3-small', // Embeddings model
   QUICK_RESPONSE_MODEL: 'groq/openai/gpt-oss-120b', // Quick waiting messages (very fast, cost-efficient)
   CONTEXT_SUMMARY_MODEL: 'groq/openai/gpt-oss-20b', // Context summary generation from logs
+  DIRECT_WRITER_MODEL: 'x-ai/grok-4.1-fast', // Direct writer model
   
   // RAG Proposition models
   PROPOSITION_GENERATOR_MODEL: 'groq/openai/gpt-oss-20b',  // Fast proposition generation
@@ -24,8 +25,8 @@ export const AI_CONFIG = {
   
   // Models by difficulty level
   COMPOSER_MODEL_LOW: 'openai/gpt-4o-mini',     // Simple tasks (greetings, basic info)
-  COMPOSER_MODEL_MEDIUM: 'x-ai/grok-4-fast',  // Standard tasks (searches, basic queries)
-  COMPOSER_MODEL_HIGH: 'x-ai/grok-4.1-fast:free',   // Complex tasks (scheduling, negotiations, escalations)
+  COMPOSER_MODEL_MEDIUM: 'x-ai/grok-4.1-fast',  // Standard tasks (searches, basic queries)
+  COMPOSER_MODEL_HIGH: 'x-ai/grok-4.1-fast',   // Complex tasks (scheduling, negotiations, escalations)
   
   // Thresholds and limits
   GUIDELINE_THRESHOLD: 0.6,           // Minimum score to activate guideline
@@ -62,18 +63,18 @@ export const AI_CONFIG = {
   // Cascade Architecture Configuration
   CASCADE: {
     ENABLED: true,                           // Enable cascade workflow
-    PLANNER_MODEL: 'x-ai/grok-4.1-fast:free',     // LLM for action planning
-    WRITER_MODEL: 'x-ai/grok-4-fast',           // LLM for response composition
-    VALIDATOR_MODEL: 'gpt-4o-mini',   // LLM for style validation
+    PLANNER_MODEL: 'x-ai/grok-4.1-fast',     // LLM for action planning
+    WRITER_MODEL: 'x-ai/grok-4.1-fast',           // LLM for response composition
+    VALIDATOR_MODEL: 'openai/gpt-4o-mini',   // LLM for style validation
     CLASSIFIER_MODEL: 'groq/openai/gpt-oss-120b',           // LLM for message classification
-    CONTEXT_SEARCH_MODEL: 'x-ai/grok-4-fast',           // LLM for context search
-    REASONING_MODEL: 'x-ai/grok-4.1-fast:free',           // LLM for reasoning
-    STYLE_VALIDATOR_MODEL: 'x-ai/grok-4.1-fast:free',  
+    CONTEXT_SEARCH_MODEL: 'x-ai/grok-4.1-fast',           // LLM for context search
+    REASONING_MODEL: 'x-ai/grok-4.1-fast',           // LLM for reasoning
+    STYLE_VALIDATOR_MODEL: 'x-ai/grok-4.1-fast',  
     WORKER_MODELS: {
-      SEARCH_WORKER_MODEL: 'groq/meta-llama/llama-4-scout-17b-16e-instruct',
-      VISIT_WORKER_MODEL: 'groq/openai/gpt-oss-20b',
-      SUPPORT_WORKER_MODEL: 'groq/openai/gpt-oss-20b',
-      FEEDBACK_WORKER_MODEL: 'groq/meta-llama/llama-4-scout-17b-16e-instruct',
+      SEARCH_WORKER_MODEL: 'deepseek/deepseek-v3.2-speciale',
+      VISIT_WORKER_MODEL: 'deepseek/deepseek-v3.2-speciale',
+      SUPPORT_WORKER_MODEL: 'deepseek/deepseek-v3.2-speciale',
+      FEEDBACK_WORKER_MODEL: 'deepseek/deepseek-v3.2-speciale',
     },         // LLM for style validation
     MAX_WORKER_RETRIES: 2,                   // Max retries per worker
     MAX_WRITER_RETRIES: 2,                   // Max retries for writer

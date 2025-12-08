@@ -7,6 +7,11 @@
 import { BaseWorker, WorkerIterationResult } from './base-worker';
 import { WORKER_REGISTRY, WorkerExecutionContext } from '../types';
 import type { GuidelineAgent } from '../../guideline-agent';
+import {
+  getHelpTool,
+  searchContextTool,
+  createReminderTool,
+} from '../../tools';
 
 export class SupportWorker extends BaseWorker {
   constructor() {
@@ -56,16 +61,30 @@ export class SupportWorker extends BaseWorker {
     prompt += `</worker_prompt>`;
 
     // Get tools from guideline agent if available
-    let tools: any = undefined;
+    let guidelineTools: Record<string, any> = {};
     if (this.guidelineAgent) {
       const orchestrator = (this.guidelineAgent as any).orchestrator;
       if (orchestrator) {
         const relevantGuidelines = context.activeGuidelines.filter(g =>
           this.definition.associatedGuidelineIds.includes(g.guideline.id)
         );
-        tools = orchestrator.getToolsForGuidelines(relevantGuidelines);
+        guidelineTools = orchestrator.getToolsForGuidelines(relevantGuidelines) || {};
       }
     }
+
+    // Create support-related tools
+    const { uid, userPhone, userName = 'Cliente' } = context;
+    const supportTools: Record<string, any> = {
+      get_help: getHelpTool(uid, userPhone, userName),
+      search_context: searchContextTool(uid, userPhone),
+      create_reminder: createReminderTool(uid, userPhone, userName),
+    };
+
+    // Merge tools: guideline tools take precedence, support tools fill in gaps
+    const tools = {
+      ...supportTools,
+      ...guidelineTools, // Guidelines override if same tool exists
+    };
 
     // Generate response
     const result = await this.generateWithModel(prompt, context, tools);

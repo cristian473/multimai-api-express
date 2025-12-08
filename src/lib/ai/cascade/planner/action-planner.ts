@@ -18,13 +18,16 @@ import { WORKER_REGISTRY, getActiveWorkers } from '../types';
 // - 'reasoning': Internal analysis/thinking step (no worker needed)
 // - 'context_search': Search in conversation history or context
 // - 'worker_call': Call a specific worker to perform an action
+// - 'ask_to_user': Stop execution and ask user for clarification/decision (skips remaining tasks)
+// Note: All fields must be required for Azure/OpenAI JSON Schema compatibility
 const TaskSchema = z.object({
   id: z.string().describe('ID único de la tarea (ej: "task_1", "task_2")'),
   step: z.number().describe('Número de paso en la secuencia (1, 2, 3...)'),
   description: z.string().describe('Descripción clara de qué hacer en este paso. Escríbelo de forma natural.'),
-  type: z.enum(['reasoning', 'context_search', 'worker_call']).describe('Tipo de tarea: reasoning=análisis interno, context_search=buscar en historial, worker_call=llamar a un worker'),
+  type: z.enum(['reasoning', 'context_search', 'worker_call', 'ask_to_user']).describe('Tipo de tarea: reasoning=análisis interno, context_search=buscar en historial, worker_call=llamar a un worker, ask_to_user=detener y preguntar al usuario'),
   workerId: z.string().describe('ID del worker a llamar. Solo requerido si type="worker_call". Dejar vacío "" si no aplica.'),
-  dependsOn: z.array(z.string()).describe('IDs de tareas que deben completarse antes. Array vacío [] si no hay dependencias.')
+  dependsOn: z.array(z.string()).describe('IDs de tareas que deben completarse antes. Array vacío [] si no hay dependencias.'),
+  questionForUser: z.string().describe('Para ask_to_user: La pregunta o consulta que se debe hacer al usuario. Debe ser clara y específica. Usar cadena vacía "" si no aplica.')
 });
 
 const ActionPlanSchema = z.object({
@@ -193,10 +196,12 @@ export class ActionPlanner {
     prompt += `      <tipo name="reasoning">Análisis interno, deducción o interpretación. No requiere worker.</tipo>\n`;
     prompt += `      <tipo name="context_search">Buscar información en el historial de conversación o contexto. No requiere worker.</tipo>\n`;
     prompt += `      <tipo name="worker_call">Ejecutar un worker específico. Requiere workerId válido.</tipo>\n`;
+    prompt += `      <tipo name="ask_to_user">Detener ejecución y preguntar al usuario. IMPORTANTE: Las tareas posteriores se OMITEN. Usar cuando necesitas que el usuario tome una decisión o aclare algo antes de continuar. Requiere questionForUser.</tipo>\n`;
     prompt += `    </tipos_tarea>\n`;
     prompt += `    <instruccion>Solo usa type="worker_call" cuando realmente necesites llamar a un worker</instruccion>\n`;
     prompt += `    <instruccion>Usa dependsOn para indicar qué tareas deben completarse antes</instruccion>\n`;
     prompt += `    <instruccion>La descripción debe ser clara y natural, explicando QUÉ hacer</instruccion>\n`;
+    prompt += `    <instruccion_ask_to_user>Usa ask_to_user cuando: (1) Hay ambigüedad que solo el usuario puede resolver, (2) Se necesita confirmación antes de ejecutar una acción importante, (3) Hay múltiples opciones y el usuario debe elegir, (4) Falta información crítica que el usuario debe proporcionar</instruccion_ask_to_user>\n`;
     prompt += `  </instrucciones_planificacion>\n\n`;
 
     prompt += `  <ejemplo_plan>\n`;
@@ -225,6 +230,22 @@ export class ActionPlanner {
     prompt += `    <mensaje_ejemplo>Hola, cómo estás?</mensaje_ejemplo>\n`;
     prompt += `    <plan_ejemplo>directToWriter=true, tasks=[] (saludo simple, no requiere acciones)</plan_ejemplo>\n`;
     prompt += `  </ejemplo_simple>\n\n`;
+
+    prompt += `  <ejemplo_ask_to_user>\n`;
+    prompt += `    <mensaje_ejemplo>Quiero agendar una visita</mensaje_ejemplo>\n`;
+    prompt += `    <tasks_ejemplo>\n`;
+    prompt += `      <task id="task_1" step="1" type="context_search" workerId="">\n`;
+    prompt += `        <description>Buscar en el historial si hay propiedades mencionadas previamente o preferencias del usuario</description>\n`;
+    prompt += `        <dependsOn>[]</dependsOn>\n`;
+    prompt += `      </task>\n`;
+    prompt += `      <task id="task_2" step="2" type="ask_to_user" workerId="">\n`;
+    prompt += `        <description>Preguntar al usuario para qué propiedad y en qué fecha/hora desea agendar la visita</description>\n`;
+    prompt += `        <questionForUser>¿Para cuál propiedad te gustaría agendar la visita? ¿Y qué día y horario te vendría mejor?</questionForUser>\n`;
+    prompt += `        <dependsOn>["task_1"]</dependsOn>\n`;
+    prompt += `      </task>\n`;
+    prompt += `    </tasks_ejemplo>\n`;
+    prompt += `    <nota>Las tareas después de ask_to_user (como worker_call para agendar) se ejecutarán cuando el usuario responda</nota>\n`;
+    prompt += `  </ejemplo_ask_to_user>\n\n`;
 
     prompt += `</planning_prompt>`;
 
@@ -297,9 +318,10 @@ export class ActionPlanner {
         id: string;
         step: number;
         description: string;
-        type: 'reasoning' | 'context_search' | 'worker_call';
+        type: 'reasoning' | 'context_search' | 'worker_call' | 'ask_to_user';
         workerId: string;
         dependsOn: string[];
+        questionForUser?: string;
       }>;
       criticalPath: boolean;
       directToWriter: boolean;
@@ -331,6 +353,7 @@ export class ActionPlanner {
         type: task.type,
         workerId: task.workerId || '',
         dependsOn: task.dependsOn || [],
+        questionForUser: task.questionForUser,
         status: 'pending'
       });
     }

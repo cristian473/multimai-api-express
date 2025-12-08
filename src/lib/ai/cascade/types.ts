@@ -20,7 +20,11 @@ export interface ClassificationResult {
 // ========== Action Plan Types ==========
 
 // Task types for the planner
-export type TaskType = 'reasoning' | 'context_search' | 'worker_call';
+// - 'reasoning': Internal analysis/thinking step
+// - 'context_search': Search in conversation history or context
+// - 'worker_call': Call a specific worker to perform an action
+// - 'ask_to_user': Stop execution and ask user for clarification/decision (skips remaining tasks)
+export type TaskType = 'reasoning' | 'context_search' | 'worker_call' | 'ask_to_user';
 
 export interface PlanTask {
   id: string;                    // Unique task ID (e.g., "task_1")
@@ -29,8 +33,9 @@ export interface PlanTask {
   type: TaskType;                // Type of task
   workerId: string;              // Worker ID (only for worker_call type, empty otherwise)
   dependsOn: string[];           // Task IDs that must complete first
+  questionForUser?: string;      // For ask_to_user: The question to ask the user
   // Runtime fields (filled during execution)
-  status?: 'pending' | 'running' | 'completed' | 'failed';
+  status?: 'pending' | 'running' | 'completed' | 'failed' | 'ask_user';
   result?: string;               // Result of this task
   error?: string;                // Error if failed
 }

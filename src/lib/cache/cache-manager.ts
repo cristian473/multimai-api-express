@@ -186,7 +186,7 @@ export async function cacheFn<TArgs extends unknown[], TResult>(
   // Try to get from cache
   const cached = await cacheGet<TResult>(cacheKey);
   if (cached !== null) {
-    console.log(`Cache hit for ${options.functionName}`);
+    console.log(`[CacheManager] Cache hit for ${options.functionName}`);
     return cached;
   }
 
